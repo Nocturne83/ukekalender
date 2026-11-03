@@ -1,0 +1,16 @@
+{
+  "name": "Ukeplanen",
+  "short_name": "Ukeplanen",
+  "description": "Planlegg uka sammen – avtaler, middag, bil og barnehage.",
+  "lang": "nb",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F2EC",
+  "theme_color": "#2E6A4E",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
