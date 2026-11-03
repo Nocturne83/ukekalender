@@ -101,6 +101,12 @@ textarea.inp{height:auto;padding:10px 12px;resize:vertical;min-height:64px}
 .inp:disabled{opacity:.45}
 .times{display:flex;gap:10px;align-items:flex-end}
 .times label.f{flex:1 1 0;min-width:0}
+.tbtn{text-align:left;font-variant-numeric:tabular-nums}
+.tbtn.on{border:2px solid var(--pri)}
+.tpick{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;background:var(--surf2);border:1px solid var(--border)}
+.tgrid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}
+.tchip{min-height:44px;border-radius:10px;border:1px solid var(--border2);background:var(--surf);font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+.tchip.on{background:var(--pri);color:var(--onPri);border-color:transparent}
 .allday{flex:0 0 auto;min-height:44px;display:flex;align-items:center;gap:8px;padding:0 4px;font-size:14px;font-weight:600;color:var(--text2);white-space:nowrap}
 .allday input{width:22px;height:22px;accent-color:var(--pri);margin:0}
 fieldset{border:0;padding:0;margin:0}
@@ -445,10 +451,9 @@ function itemForm(f, p, err, isEdit, it) {
     '<label class="f">Hva?<input class="inp" data-' + p + '="title" type="text" placeholder="F.eks. Tannlegen" value="' + esc(f.title) + '"></label>' +
     (isEdit ? '<label class="f">Dato<input class="inp" data-' + p + '="date" type="date" value="' + esc(f.date) + '"></label>' : '') +
     '<div class="times">' +
-    '<label class="f">Fra<input class="inp" data-' + p + '="start" type="time" value="' + esc(f.start) + '"' + (f.allDay ? ' disabled' : '') + '></label>' +
-    '<label class="f">Til<input class="inp" data-' + p + '="end" type="time" value="' + esc(f.end) + '"' + (f.allDay ? ' disabled' : '') + '></label>' +
+    timeBtn(f, p, 'start', 'Fra') + timeBtn(f, p, 'end', 'Til') +
     '<label class="allday"><input type="checkbox" data-a="toggleAllDay" data-p="' + p + '"' + (f.allDay ? ' checked' : '') + '>Hele dagen?</label>' +
-    '</div>' +
+    '</div>' + timePicker(f, p) +
     '<label class="f">Hvor?<input class="inp" data-' + p + '="where" type="text" placeholder="Adresse eller Google Maps-lenke" value="' + esc(f.where) + '"></label>' +
     '<fieldset><legend>Hvem tar det?</legend><div class="row wrap">' + whoChips(f.who, p === 'f' ? 'formWho' : 'editWho') + '</div></fieldset>' +
     (f.who === 'other' ? '<label class="f">Hvem?<input class="inp" data-' + p + '="other" type="text" placeholder="F.eks. en venn" value="' + esc(f.other) + '"></label>' : '') +
@@ -459,6 +464,31 @@ function itemForm(f, p, err, isEdit, it) {
     '<div class="btns"><button class="btn fixed" data-a="' + (isEdit ? 'cancelEdit' : 'cancelAdd') + '">Avbryt</button><button class="btn pri" data-a="' + (isEdit ? 'saveEdit' : 'saveAdd') + '"' + (isEdit ? ' data-v="' + it.id + '"' : '') + '>Send til ' + esc(N(other())) + '</button></div>' +
     '</div>';
 }
+
+// Own time picker: Samsung's built-in clock dialog can grow too big to use.
+function timeBtn(f, p, k, label) {
+  var open = S.timePick && S.timePick.p === p && S.timePick.k === k;
+  return '<label class="f">' + label + '<button type="button" class="inp tbtn' + (open ? ' on' : '') + '" data-a="timeOpen" data-p="' + p + '" data-k="' + k + '"' + (f.allDay ? ' disabled' : '') + '>' + esc(f[k] || '--:--') + '</button></label>';
+}
+function timePicker(f, p) {
+  if (!S.timePick || S.timePick.p !== p || f.allDay) return '';
+  var k = S.timePick.k, cur = (f[k] || '12:00').split(':');
+  var h = '', m = '';
+  for (var i = 6; i < 30; i++) {
+    var hh = pad(i % 24);
+    h += '<button type="button" class="tchip' + (hh === cur[0] ? ' on' : '') + '" data-a="timeHour" data-v="' + hh + '">' + hh + '</button>';
+  }
+  for (var j = 0; j < 60; j += 5) {
+    var mm = pad(j);
+    m += '<button type="button" class="tchip' + (mm === cur[1] ? ' on' : '') + '" data-a="timeMin" data-v="' + mm + '">:' + mm + '</button>';
+  }
+  return '<div class="tpick"><span class="small" style="font-weight:700;color:var(--text2)">' + (k === 'start' ? 'Fra' : 'Til') + ' – time</span><div class="tgrid">' + h + '</div>' +
+    '<span class="small" style="font-weight:700;color:var(--text2)">Minutter</span><div class="tgrid">' + m + '</div>' +
+    '<button type="button" class="btn sm" data-a="timeDone">Ferdig</button></div>';
+}
+function addMin(t, n) { var p = t.split(':').map(Number), x = (p[0] * 60 + p[1] + n + 1440) % 1440; return pad(Math.floor(x / 60)) + ':' + pad(x % 60); }
+function fixEnd(f, k) { if (k === 'start' && f.end && f.end <= f.start) f.end = addMin(f.start, 60); }
+function pickForm() { return S.timePick.p === 'f' ? S.form : S.edit; }
 
 function overview() {
   var mon = weekMonday(S.week), h = '';
@@ -575,7 +605,7 @@ function opt(mutate, call, okMsg) {
   });
 }
 function findItem(id) { return S.data.items.filter(function (i) { return i.id === id; })[0]; }
-function resetCard() { S.editing = null; S.cancelling = null; S.editErr = ''; S.cancelErr = ''; }
+function resetCard() { S.timePick = null; S.editing = null; S.cancelling = null; S.editErr = ''; S.cancelErr = ''; }
 function openItem(id, edit) {
   var it = findItem(id);
   if (!it) return;
@@ -629,9 +659,16 @@ var A = {
     S.tileEdit = null;
     opt(function (d) { d.tiles[date + '|' + k] = v; }, function () { return api('setTile', date, k, v); }, null);
   },
-  startAdd: function (el) { S.adding = Number(el.dataset.v); S.form = emptyForm(); S.formErr = ''; render(); var i = app.querySelector('[data-f="title"]'); if (i) i.focus(); },
+  startAdd: function (el) { S.timePick = null; S.adding = Number(el.dataset.v); S.form = emptyForm(); S.formErr = ''; render(); var i = app.querySelector('[data-f="title"]'); if (i) i.focus(); },
   cancelAdd: function () { S.adding = -1; S.formErr = ''; render(); },
   showDesc: function () { S.form.showDesc = true; render(); var t = app.querySelector('[data-f="desc"]'); if (t) t.focus(); },
+  timeOpen: function (el) {
+    var same = S.timePick && S.timePick.p === el.dataset.p && S.timePick.k === el.dataset.k;
+    S.timePick = same ? null : { p: el.dataset.p, k: el.dataset.k }; render();
+  },
+  timeHour: function (el) { var f = pickForm(), k = S.timePick.k; f[k] = el.dataset.v + ':' + ((f[k] || '12:00').split(':')[1]); fixEnd(f, k); render(); },
+  timeMin: function (el) { var f = pickForm(), k = S.timePick.k; f[k] = ((f[k] || '12:00').split(':')[0]) + ':' + el.dataset.v; fixEnd(f, k); S.timePick = null; render(); },
+  timeDone: function () { S.timePick = null; render(); },
   toggleAllDay: function (el) { var f = el.dataset.p === 'f' ? S.form : S.edit; f.allDay = !f.allDay; render(); },
   formWho: function (el) { S.form.who = el.dataset.v; render(); },
   editWho: function (el) { S.edit.who = el.dataset.v; render(); },
