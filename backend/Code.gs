@@ -113,8 +113,9 @@ function checkSettings() {
 
 /** Run after deploying: logs the two personal links. */
 function showLinks() {
-  const url = ScriptApp.getService().getUrl();
+  const url = backendUrl_();
   if (!url) { Logger.log('Deploy as a web app first.'); return; }
+  if (/\/dev$/.test(url)) { Logger.log('⚠️ This is the test address. Add BACKEND_URL under Script Properties (the /exec address from Deploy > Manage deployments) and run showLinks again.'); return; }
   if (!prop_('APP_URL')) { Logger.log('Fill in APP_URL under Script Properties first.'); return; }
   PERSONS.forEach(function (p) { Logger.log(name_(p) + ': ' + appLink_(p)); });
   Logger.log('Keep the links private – whoever has a link can use the app.');
@@ -623,8 +624,13 @@ function tileLabel_(v) {
   return whoLabel_(v);
 }
 function newKey_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 16); }
+function backendUrl_() {
+  // BACKEND_URL (the /exec address from Deploy > Manage deployments) wins, because
+  // getUrl() can return the /dev test address when run from the editor.
+  return (prop_('BACKEND_URL') || ScriptApp.getService().getUrl() || '').trim();
+}
 function appLink_(p) {
-  return prop_('APP_URL') + '#k=' + prop_('KEY_' + p) + '&b=' + encodeURIComponent(ScriptApp.getService().getUrl());
+  return prop_('APP_URL') + '#k=' + prop_('KEY_' + p) + '&b=' + encodeURIComponent(backendUrl_());
 }
 function who_(key) {
   for (let i = 0; i < PERSONS.length; i++) {

@@ -26,6 +26,7 @@ Ingen navn, e-poster eller andre personopplysninger ligger i koden. De legges in
    | `NAME_P2` | Navnet til den andre |
    | `EMAIL_P2` | E-postadressen til den andre |
    | `APP_URL` | Adressen til appen, f.eks. `https://<bruker>.github.io/<repo>/` |
+   | `BACKEND_URL` | Web app-adressen fra Deploy → Manage deployments (slutter på `/exec`) |
 4. Kjør `setup` og godkjenn tilgangene.
 5. *Deploy → New deployment → Web app*, «Execute as: Me», «Who has access: Anyone».
 6. Kjør `showLinks` for å få de to personlige lenkene.
