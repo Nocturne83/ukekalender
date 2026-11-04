@@ -1,5 +1,5 @@
 /**
- * Ukeplanen v2 – backend (Google Apps Script)
+ * Ukeplanen v2.1 – backend (Google Apps Script)
  *
  * The app itself lives on GitHub Pages. This script stores data in a Google Sheet,
  * syncs to the "Husholdning" calendar / Google Tasks, and sends push notifications.
@@ -50,10 +50,14 @@ const PERSONS = ['p1', 'p2'];
 // Column order matters: v1 data uses the same positions.
 const ITEM_COLS = ['id', 'date', 'start', 'end', 'title', 'desc', 'who', 'by', 'ok2', 'ok1',
   'status', 'eventId', 'taskId', 'note', 'noteBy', 'src', 'created', 'updated',
-  'allDay', 'where', 'whereAddr', 'lat', 'lng', 'mapUrl'];
+  'allDay', 'where', 'whereAddr', 'lat', 'lng', 'mapUrl',
+  'drive', 'driveAt', 'pick', 'pickAt', 'driveEv', 'driveTask', 'pickEv', 'pickTask'];
 const TILE_COLS = ['date', 'key', 'value', 'by', 'updated'];
 const NOTE_COLS = ['id', 'to', 'text', 'itemId', 'created', 'seen'];
 const DEVICE_COLS = ['token', 'person', 'created'];
+const MSG_COLS = ['id', 'from', 'text', 'created'];
+const SHEET_COLS = { Avtaler: ITEM_COLS, Oppsett: TILE_COLS, Varsler: NOTE_COLS, Enheter: DEVICE_COLS, Beskjeder: MSG_COLS };
+const MSG_DAYS = 30;  // messages older than this are deleted
 const TILE_NAMES = { middag: 'Middag', bil: 'Bilen', lev: 'Levering bhg.', hent: 'Henting bhg.' };
 const DAY_NAMES = ['mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag', 'søndag'];
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'mai', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'des'];
@@ -156,7 +160,8 @@ const API = {
   getState: function (me) { try { importFromCalendar_(); } catch (err) { console.warn('Import: ' + err); } return state_(me); },
   saveItem: saveItem_, confirmItem: confirmItem_, undoConfirm: undoConfirm_, changeItem: changeItem_,
   cancelItem: cancelItem_, setTile: setTile_, markSeen: markSeen_, setReminder: setReminder_,
-  registerPush: registerPush_, unregisterPush: unregisterPush_
+  registerPush: registerPush_, unregisterPush: unregisterPush_,
+  sendMessage: sendMessage_, readMessages: readMessages_
 };
 
 function doPost(e) {
@@ -188,7 +193,7 @@ function saveItem_(me, f) {
   it.created = it.updated = nowIso_();
   Object.assign(it, place_(it.where));
   appendRow_('Avtaler', ITEM_COLS, it);
-  notify_(other_(me), name_(me) + ' har lagt inn «' + it.title + '» ' + when_(it) + '. Stemmer det?', it.id, true);
+  notify_(other_(me), name_(me) + ' har lagt inn «' + it.title + '» ' + when_(it) + '. Stemmer det?', it.id, 'ask');
   return state_(me);
 }
 
@@ -197,7 +202,7 @@ function confirmItem_(me, id) {
   it[okF_(me)] = '1';
   if (it.ok1 && it.ok2) {
     sync_(it);
-    notify_(other_(me), name_(me) + ' bekreftet «' + it.title + '» ' + when_(it) + '.', it.id, false);
+    notify_(other_(me), name_(me) + ' bekreftet «' + it.title + '» ' + when_(it) + '.', it.id, 'info');
   }
   it.updated = nowIso_();
   saveRow_(it);
@@ -212,7 +217,7 @@ function undoConfirm_(me, id) {
   it[okF_(me)] = '';
   if (wasConfirmed) {
     unsync_(it);
-    notify_(other_(me), name_(me) + ' angret bekreftelsen av «' + it.title + '» – den er ikke avklart ennå.', it.id, false);
+    notify_(other_(me), name_(me) + ' angret bekreftelsen av «' + it.title + '» – den er ikke avklart ennå.', it.id, 'info');
   }
   it.updated = nowIso_();
   saveRow_(it);
@@ -227,18 +232,18 @@ function changeItem_(me, id, f, comment) {
   const before = summary_(it);
   const oldWhere = it.where;
   const c = clean_(f);
-  ['date', 'start', 'end', 'title', 'desc', 'who', 'allDay', 'where'].forEach(function (k) { it[k] = c[k]; });
+  ['date', 'start', 'end', 'title', 'desc', 'who', 'allDay', 'where', 'drive', 'driveAt', 'pick', 'pickAt'].forEach(function (k) { it[k] = c[k]; });
   if (it.where !== oldWhere) Object.assign(it, place_(it.where));
   if (comment) { it.note = comment; it.noteBy = me; }
   it.updated = nowIso_();
   const other = other_(me);
   if (wasConfirmed) {
     sync_(it);
-    notify_(other, name_(me) + ' endret «' + it.title + '»: ' + diff_(before, summary_(it)) + (comment ? ' – «' + comment + '»' : ''), it.id, true);
+    notify_(other, name_(me) + ' endret «' + it.title + '»: ' + diff_(before, summary_(it)) + (comment ? ' – «' + comment + '»' : ''), it.id, 'important');
   } else {
     it[okF_(me)] = '1';
     it[okF_(other)] = '';
-    notify_(other, name_(me) + ' foreslår en endring på «' + it.title + '» ' + when_(it) + (comment ? ' – «' + comment + '»' : '') + '. Stemmer det?', it.id, true);
+    notify_(other, name_(me) + ' foreslår en endring på «' + it.title + '» ' + when_(it) + (comment ? ' – «' + comment + '»' : '') + '. Stemmer det?', it.id, 'ask');
   }
   saveRow_(it);
   return state_(me);
@@ -254,7 +259,7 @@ function cancelItem_(me, id, comment) {
   it.noteBy = me;
   it.updated = nowIso_();
   saveRow_(it);
-  notify_(other_(me), name_(me) + ' avlyste «' + it.title + '» ' + when_(it) + ' – «' + comment + '»', '', true);
+  notify_(other_(me), name_(me) + ' avlyste «' + it.title + '» ' + when_(it) + ' – «' + comment + '»', '', 'important');
   return state_(me);
 }
 
@@ -264,7 +269,7 @@ function setTile_(me, date, k, value) {
   const row = readRows_(sh, TILE_COLS).filter(function (r) { return r.date === date && r.key === k; })[0];
   const rec = { date: date, key: k, value: value, by: me, updated: nowIso_() };
   if (row) writeRow_(sh, TILE_COLS, row._row, rec); else appendRow_('Oppsett', TILE_COLS, rec);
-  notify_(other_(me), name_(me) + ' endret ' + TILE_NAMES[k].toLowerCase() + ' ' + dateLabel_(date) + ': ' + tileLabel_(value) + '.', '', false);
+  notify_(other_(me), name_(me) + ' endret ' + TILE_NAMES[k].toLowerCase() + ' ' + dateLabel_(date) + ': ' + tileLabel_(value) + '.', '', 'info');
   return state_(me);
 }
 
@@ -285,6 +290,19 @@ function setReminder_(me, mode) {
   return state_(me);
 }
 
+function sendMessage_(me, text) {
+  text = String(text || '').trim().slice(0, 500);
+  if (!text) throw new Error('Skriv en beskjed');
+  appendRow_('Beskjeder', MSG_COLS, { id: 'b' + Date.now().toString(36) + Math.floor(Math.random() * 1000), from: me, text: text, created: new Date().toISOString() });
+  setRead_(me);
+  const pushed = push_(other_(me), name_(me), text);
+  if (!pushed) sendMail_(other_(me), CONFIG.APP_NAME + ': beskjed fra ' + name_(me), text);
+  return state_(me);
+}
+
+function readMessages_(me) { setRead_(me); return state_(me); }
+function setRead_(me) { PropertiesService.getScriptProperties().setProperty('READ_' + me, new Date().toISOString()); }
+
 function registerPush_(me, token) {
   token = String(token || '');
   if (token.length < 20) throw new Error('Ugyldig enhet');
@@ -304,6 +322,7 @@ function unregisterPush_(me, token) {
 
 function hourlyReminder() {
   const now = new Date();
+  if (Number(Utilities.formatDate(now, CONFIG.TIME_ZONE, 'H')) === 3) cleanMessages_();
   if (Number(Utilities.formatDate(now, CONFIG.TIME_ZONE, 'H')) !== CONFIG.REMINDER_HOUR) return;
   const isSunday = Utilities.formatDate(now, CONFIG.TIME_ZONE, 'u') === '7';
   const items = activeItems_();
@@ -317,9 +336,17 @@ function hourlyReminder() {
   });
 }
 
+function cleanMessages_() {
+  const sh = sheet_('Beskjeder');
+  const limit = new Date(Date.now() - MSG_DAYS * 86400000).toISOString();
+  readRows_(sh, MSG_COLS).filter(function (m) { return m.created < limit; }).reverse().forEach(function (m) { sh.deleteRow(m._row); });
+}
+
 // ===================== Calendar / Tasks sync =====================
 
 function sync_(it) {
+  syncLeg_(it, 'drive');
+  syncLeg_(it, 'pick');
   const asTask = it.who === 'p1' && !it.allDay && it.src !== 'kalender';
   if (asTask) {
     if (it.eventId) { deleteEvent_(it.eventId); it.eventId = ''; }
@@ -333,6 +360,35 @@ function sync_(it) {
 function unsync_(it) {
   if (it.eventId) { deleteEvent_(it.eventId); it.eventId = ''; }
   if (it.taskId) { deleteTask_(it.taskId); it.taskId = ''; }
+  ['drive', 'pick'].forEach(function (leg) {
+    if (it[leg + 'Ev']) { deleteEvent_(it[leg + 'Ev']); it[leg + 'Ev'] = ''; }
+    if (it[leg + 'Task']) { deleteTask_(it[leg + 'Task']); it[leg + 'Task'] = ''; }
+  });
+}
+
+/** Driving there / picking up: its own short event (or task for person 1) at the chosen time. */
+function syncLeg_(it, leg) {
+  const who = it[leg], at = it[leg + 'At'];
+  const evK = leg + 'Ev', taskK = leg + 'Task';
+  if (!who || !at) {
+    if (it[evK]) { deleteEvent_(it[evK]); it[evK] = ''; }
+    if (it[taskK]) { deleteTask_(it[taskK]); it[taskK] = ''; }
+    return;
+  }
+  const legIt = {
+    date: it.date, start: at, end: '', allDay: '', who: who,
+    title: (leg === 'drive' ? 'Kjøre til ' : 'Hente fra ') + it.title,
+    desc: it.desc, where: it.where, whereAddr: it.whereAddr, note: '',
+    eventId: it[evK], taskId: it[taskK]
+  };
+  if (who === 'p1') {
+    if (it[evK]) { deleteEvent_(it[evK]); it[evK] = ''; }
+    it[taskK] = upsertTask_(legIt);
+  } else {
+    if (it[taskK]) { deleteTask_(it[taskK]); it[taskK] = ''; }
+    legIt.end = addMin_(at, 30);
+    it[evK] = upsertEvent_(legIt);
+  }
 }
 
 function cal_() {
@@ -422,7 +478,7 @@ function importFromCalendar_() {
     };
     if (it.where) Object.assign(it, place_(it.where));
     appendRow_('Avtaler', ITEM_COLS, it);
-    notify_('p2', name_('p1') + ' har lagt inn «' + it.title + '» ' + when_(it) + '. Stemmer det?', it.id, false);
+    notify_('p2', name_('p1') + ' har lagt inn «' + it.title + '» ' + when_(it) + '. Stemmer det?', it.id, 'ask');
     known[it.eventId] = true;
     added++;
   });
@@ -482,10 +538,17 @@ function followRedirects_(url) {
 
 // ===================== Notifications =====================
 
-function notify_(to, text, itemId, important) {
-  appendRow_('Varsler', NOTE_COLS, { id: 'v' + Date.now().toString(36) + Math.floor(Math.random() * 1000), to: to, text: text, itemId: itemId || '', created: nowIso_(), seen: '' });
+/**
+ * kind 'ask'       – needs an answer: shown under "Trenger svar" (no extra note), push.
+ * kind 'info'      – for information: note under "Til informasjon", push.
+ * kind 'important' – like info, and email to person 2 if she has no push yet.
+ */
+function notify_(to, text, itemId, kind) {
+  if (kind !== 'ask') {
+    appendRow_('Varsler', NOTE_COLS, { id: 'v' + Date.now().toString(36) + Math.floor(Math.random() * 1000), to: to, text: text, itemId: itemId || '', created: nowIso_(), seen: '' });
+  }
   const pushed = push_(to, CONFIG.APP_NAME, text);
-  if (important && !pushed) sendMail_(to, CONFIG.APP_NAME + ': ' + text.slice(0, 70), text);
+  if (!pushed && kind !== 'info') sendMail_(to, CONFIG.APP_NAME + ': ' + text.slice(0, 70), text);
 }
 
 /** Sends a push to all of a person's devices. Returns true if at least one got it. */
@@ -544,8 +607,10 @@ function removeDevice_(token) {
   rows.reverse().forEach(function (d) { sh.deleteRow(d._row); });
 }
 
+/** Email is only a fallback for person 2 until push is on. Person 1 never gets email. */
 function sendMail_(p, subject, text) {
-  const to = p === 'p1' ? Session.getEffectiveUser().getEmail() : prop_('EMAIL_P2');
+  if (p === 'p1') return;
+  const to = prop_('EMAIL_P2');
   if (!to) return;
   try {
     MailApp.sendEmail(to, subject, text + (prop_('APP_URL') ? '\n\nÅpne ' + CONFIG.APP_NAME + ': ' + appLink_(p) : ''));
@@ -560,9 +625,15 @@ function state_(me) {
   const tiles = {};
   readRows_(sheet_('Oppsett'), TILE_COLS).forEach(function (t) { tiles[t.date + '|' + t.key] = t.value; });
   const notes = readRows_(sheet_('Varsler'), NOTE_COLS)
-    .filter(function (n) { return n.to === me && !n.seen; })
+    .filter(function (n) { return n.to === me && !n.seen && !/Stemmer det\?$/.test(n.text); })
     .map(function (n) { return { id: n.id, text: n.text, itemId: n.itemId, created: n.created }; })
     .reverse();
+  const lastRead = prop_('READ_' + me) || '';
+  const limit = new Date(Date.now() - MSG_DAYS * 86400000).toISOString();
+  const messages = readRows_(sheet_('Beskjeder'), MSG_COLS)
+    .filter(function (m) { return m.created >= limit; })
+    .map(function (m) { return { id: m.id, from: m.from, text: m.text, created: m.created }; });
+  const unread = messages.filter(function (m) { return m.from !== me && m.created > lastRead; }).length;
   let firebase = null;
   try {
     if (prop_('FIREBASE_CONFIG') && prop_('FIREBASE_VAPID')) firebase = { config: parseConfig_(prop_('FIREBASE_CONFIG')), vapidKey: prop_('FIREBASE_VAPID').trim() };
@@ -576,12 +647,15 @@ function state_(me) {
     items: items.map(function (it) {
       return { id: it.id, date: it.date, start: it.start, end: it.end, title: it.title, desc: it.desc, who: it.who,
         by: it.by, ok1: !!it.ok1, ok2: !!it.ok2, note: it.note, noteBy: it.noteBy, src: it.src,
-        allDay: !!it.allDay, where: it.where, whereAddr: it.whereAddr, lat: it.lat, lng: it.lng, mapUrl: it.mapUrl };
+        allDay: !!it.allDay, where: it.where, whereAddr: it.whereAddr, lat: it.lat, lng: it.lng, mapUrl: it.mapUrl,
+        drive: it.drive, driveAt: it.driveAt, pick: it.pick, pickAt: it.pickAt };
     }),
     tiles: tiles,
     defaults: CONFIG.DEFAULT_TILES,
     tileOptions: CONFIG.TILE_OPTIONS,
     notes: notes,
+    messages: messages,
+    unreadMessages: unread,
     reminder: prop_('REM_' + me) || 'sunday',
     firebase: firebase,
     pushDevices: readRows_(sheet_('Enheter'), DEVICE_COLS).filter(function (d) { return d.person === me; }).length
@@ -647,8 +721,14 @@ function clean_(f) {
   const it = {
     date: s(f.date, 10), start: s(f.start, 5), end: s(f.end, 5),
     title: s(f.title, 120), desc: s(f.desc, 1000), who: s(f.who, 40) || 'p1',
-    allDay: f.allDay ? '1' : '', where: s(f.where, 500)
+    allDay: f.allDay ? '1' : '', where: s(f.where, 500),
+    drive: s(f.drive, 40), driveAt: s(f.driveAt, 5), pick: s(f.pick, 40), pickAt: s(f.pickAt, 5)
   };
+  ['driveAt', 'pickAt'].forEach(function (k) {
+    if (it[k] && !/^\d{2}:\d{2}$/.test(it[k])) throw new Error('Ugyldig tid for kjøring/henting');
+  });
+  if (it.drive && !it.driveAt) throw new Error('Velg tid for kjøring');
+  if (it.pick && !it.pickAt) throw new Error('Velg tid for henting');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(it.date)) throw new Error('Ugyldig dato');
   if (it.allDay) { it.start = ''; it.end = ''; }
   if (it.start && !/^\d{2}:\d{2}$/.test(it.start)) throw new Error('Ugyldig starttid');
@@ -658,12 +738,16 @@ function clean_(f) {
   return it;
 }
 
-function summary_(it) { return { when: when_(it), who: it.who, title: it.title }; }
+function summary_(it) {
+  return { when: when_(it), who: it.who, title: it.title,
+    legs: (it.drive ? 'kjører ' + whoLabel_(it.drive) + ' ' + it.driveAt : '') + (it.pick ? ' henter ' + whoLabel_(it.pick) + ' ' + it.pickAt : '') };
+}
 function diff_(a, b) {
   const parts = [];
   if (a.when !== b.when) parts.push(a.when + ' → ' + b.when);
   if (a.who !== b.who) parts.push('hvem: ' + whoLabel_(a.who) + ' → ' + whoLabel_(b.who));
   if (a.title !== b.title) parts.push('tittel endret');
+  if (a.legs !== b.legs) parts.push('kjøring/henting: ' + (b.legs.trim() || 'fjernet'));
   return parts.length ? parts.join(', ') : 'detaljer';
 }
 function when_(it) { return dateLabel_(it.date) + (it.allDay ? ' (hele dagen)' : it.start ? ' kl. ' + it.start : ''); }
@@ -673,6 +757,10 @@ function dateLabel_(ds) {
   return DAY_NAMES[(d.getDay() + 6) % 7] + ' ' + p[2] + '. ' + MONTHS[p[1] - 1];
 }
 function toDate_(ds, hm) { return Utilities.parseDate(ds + ' ' + hm, CONFIG.TIME_ZONE, 'yyyy-MM-dd HH:mm'); }
+function addMin_(hm, n) {
+  const p = hm.split(':').map(Number), x = (p[0] * 60 + p[1] + n + 1440) % 1440;
+  return ('0' + Math.floor(x / 60)).slice(-2) + ':' + ('0' + (x % 60)).slice(-2);
+}
 function nowIso_() { return Utilities.formatDate(new Date(), CONFIG.TIME_ZONE, "yyyy-MM-dd'T'HH:mm"); }
 
 function withLock_(fn) {
@@ -681,7 +769,21 @@ function withLock_(fn) {
   try { return fn(); } finally { lock.releaseLock(); }
 }
 
-function sheet_(name) { return SpreadsheetApp.openById(prop_('SHEET_ID')).getSheetByName(name); }
+const _checked = {};
+/** Opens a sheet, and adds it or its new columns the first time (so updates need no setup run). */
+function sheet_(name) {
+  const ss = SpreadsheetApp.openById(prop_('SHEET_ID'));
+  let sh = ss.getSheetByName(name);
+  const cols = SHEET_COLS[name];
+  if (cols && !_checked[name]) {
+    _checked[name] = true;
+    if (!sh || sh.getMaxColumns() < cols.length || sh.getRange(1, cols.length).getValue() !== cols[cols.length - 1]) {
+      ensureSheet_(ss, name, cols);
+      sh = ss.getSheetByName(name);
+    }
+  }
+  return sh;
+}
 
 function ensureSheet_(ss, name, cols) {
   let sh = ss.getSheetByName(name);
