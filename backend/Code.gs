@@ -113,6 +113,11 @@ function checkSettings() {
   if (push.length === 0) {
     try { fcmAccessToken_(); Logger.log('✅ Push: service account works'); } catch (err) { Logger.log('⚠️ Push: ' + err.message); }
   }
+  PERSONS.forEach(function (p) {
+    const n = readRows_(sheet_('Enheter'), DEVICE_COLS).filter(function (d) { return d.person === p; }).length;
+    Logger.log('📱 ' + name_(p) + ': ' + n + ' telefon(er) med varsler');
+  });
+  if (prop_('LAST_PUSH_ERROR')) Logger.log('Last push error: ' + prop_('LAST_PUSH_ERROR'));
 }
 
 /** Run after deploying: logs the two personal links. */
@@ -133,8 +138,13 @@ function newLinks() {
 
 /** Sends a test push to every device that has turned on notifications. */
 function testPush() {
-  PERSONS.forEach(function (p) { push_(p, CONFIG.APP_NAME, 'Testvarsel til ' + name_(p) + ' ✅'); });
-  Logger.log('Sent. Devices: ' + readRows_(sheet_('Enheter'), DEVICE_COLS).length);
+  PropertiesService.getScriptProperties().deleteProperty('LAST_PUSH_ERROR');
+  PERSONS.forEach(function (p) {
+    const n = readRows_(sheet_('Enheter'), DEVICE_COLS).filter(function (d) { return d.person === p; }).length;
+    const ok = push_(p, CONFIG.APP_NAME, 'Testvarsel til ' + name_(p) + ' ✅');
+    Logger.log(name_(p) + ': ' + n + ' telefon(er) · ' + (ok ? '✅ sendt' : n ? '⚠️ ikke levert' : 'ingen telefon registrert'));
+  });
+  if (prop_('LAST_PUSH_ERROR')) Logger.log('Error from Google: ' + prop_('LAST_PUSH_ERROR'));
 }
 
 /** Fixes the calendar's time zone and moves existing events to the right time. */
@@ -309,8 +319,9 @@ function registerPush_(me, token) {
   const sh = sheet_('Enheter');
   const exists = readRows_(sh, DEVICE_COLS).some(function (d) { return d.token === token && d.person === me; });
   if (!exists) appendRow_('Enheter', DEVICE_COLS, { token: token, person: me, created: nowIso_() });
-  push_(me, CONFIG.APP_NAME, 'Varsler er slått på ✅');
-  return state_(me);
+  const st = state_(me);
+  st.pushTest = push_(me, CONFIG.APP_NAME, 'Varsler er slått på ✅') ? 'ok' : (prop_('LAST_PUSH_ERROR') || 'ukjent feil');
+  return st;
 }
 
 function unregisterPush_(me, token) {
@@ -572,12 +583,18 @@ function push_(p, title, body) {
           webpush: { fcm_options: link ? { link: link } : undefined, notification: { icon: link + 'icons/icon-192.png', badge: link + 'icons/badge-96.png' } }
         } })
       });
-      const code = r.getResponseCode();
-      if (code === 200) ok = true;
-      else if (code === 404 || /UNREGISTERED|INVALID_ARGUMENT/.test(r.getContentText())) removeDevice_(d.token);
-      else console.warn('Push failed: ' + code + ' ' + r.getContentText());
+      const code = r.getResponseCode(), body = r.getContentText();
+      if (code === 200) { ok = true; return; }
+      // Only forget a phone when Google says it no longer exists; keep it for any other error.
+      if (code === 404 || /UNREGISTERED/.test(body)) removeDevice_(d.token);
+      const msg = nowIso_() + ' · ' + name_(p) + ' · HTTP ' + code + ' · ' + body.slice(0, 400);
+      PropertiesService.getScriptProperties().setProperty('LAST_PUSH_ERROR', msg);
+      console.warn('Push failed: ' + msg);
     });
-  } catch (err) { console.warn('Push error: ' + err); }
+  } catch (err) {
+    PropertiesService.getScriptProperties().setProperty('LAST_PUSH_ERROR', nowIso_() + ' · ' + String(err).slice(0, 400));
+    console.warn('Push error: ' + err);
+  }
   return ok;
 }
 

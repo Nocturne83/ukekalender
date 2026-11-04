@@ -1,5 +1,5 @@
 /* Ukeplanen service worker: offline app shell + push notifications. */
-const CACHE = 'ukeplanen-v2.1.0';
+const CACHE = 'ukeplanen-v2.1.1';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/badge-96.png'];
 
 self.addEventListener('install', (e) => {

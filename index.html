@@ -657,7 +657,7 @@ function pushBox() {
   if (isIOS() && !isStandalone()) return '<div class="pushbox">For å få varsler på iPhone: trykk Del-knappen i Safari og velg «Legg til på Hjem-skjerm». Åpne appen derfra og trykk på bjella.</div>';
   if (!pushSupported()) return '';
   if (Notification.permission === 'denied') return '<div class="pushbox">Varsler er blokkert for appen. Slå dem på i telefonens innstillinger.</div>';
-  if (Notification.permission === 'granted' && store('ukeplanen-push')) return '<div class="pushbox"><span>' + I.check + ' Varsler er på for denne telefonen.</span></div>';
+  if (Notification.permission === 'granted' && store('ukeplanen-push') && S.data.pushDevices > 0) return '<div class="pushbox"><span>' + I.check + ' Varsler er på for denne telefonen.</span><button class="link" data-a="enablePush">Registrer telefonen på nytt</button></div>';
   return '<div class="pushbox"><span>Få beskjed med en gang når noe er lagt inn eller endret.</span><button class="btn pri" data-a="enablePush"' + (S.pushBusy ? ' disabled' : '') + '>' + (S.pushBusy ? 'Slår på…' : 'Slå på varsler') + '</button></div>';
 }
 
@@ -889,7 +889,7 @@ var A = {
   seen: function (el) { var id = el.dataset.v; opt(function (d) { d.notes = d.notes.filter(function (n) { return n.id !== id; }); }, function () { return api('markSeen', [id]); }, null); },
   seenAll: function () { opt(function (d) { d.notes = []; }, function () { return api('markSeen', 'all'); }, null); },
   cycleRem: function () { var m = REM_NEXT[S.data.reminder]; opt(function (d) { d.reminder = m; }, function () { return api('setReminder', m); }, null); },
-  enablePush: function () { enablePush(); },
+  enablePush: function () { enablePush(false); },
   mockSwitch: function () { CONN.k = CONN.k === 'p1' ? 'p2' : 'p1'; resetCard(); S.adding = -1; load(); }
 };
 
@@ -944,11 +944,11 @@ if ('serviceWorker' in navigator && !DEMO) {
 function loadScript(src) {
   return new Promise(function (res, rej) { var s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = function () { rej(new Error('Kunne ikke laste ' + src)); }; document.head.appendChild(s); });
 }
-function enablePush() {
+function enablePush(silent) {
   var fb = S.data.firebase;
   if (!fb || S.pushBusy) return;
-  S.pushBusy = true; render();
-  Notification.requestPermission().then(function (perm) {
+  S.pushBusy = true; if (!silent) render();
+  (Notification.permission === 'granted' ? Promise.resolve('granted') : Notification.requestPermission()).then(function (perm) {
     if (perm !== 'granted') throw new Error('Varsler ble ikke tillatt.');
     return loadScript('https://www.gstatic.com/firebasejs/' + FB_VERSION + '/firebase-app-compat.js');
   }).then(function () {
@@ -963,10 +963,20 @@ function enablePush() {
     store('ukeplanen-push', token);
     return api('registerPush', token);
   }).then(function (st) {
-    S.data = st; S.pushBusy = false; toast('Varsler er slått på');
+    S.data = st; S.pushBusy = false;
+    if (!silent) toast(st.pushTest === 'ok' || !st.pushTest ? 'Varsler er slått på' : 'Registrert, men testvarselet feilet: ' + String(st.pushTest).slice(0, 120));
+    else render();
   }).catch(function (e) {
-    S.pushBusy = false; toast(e && e.message ? e.message : 'Kunne ikke slå på varsler');
+    S.pushBusy = false; if (!silent) toast(e && e.message ? e.message : 'Kunne ikke slå på varsler'); else render();
   });
+}
+// If this phone allowed notifications but the server doesn't know it, register again quietly.
+var autoPushTried = false;
+function maybeReRegister() {
+  if (autoPushTried || DEMO || !S.data || !S.data.firebase || !pushSupported()) return;
+  if (Notification.permission !== 'granted' || S.data.pushDevices > 0) return;
+  autoPushTried = true;
+  enablePush(true);
 }
 
 // ---------- Demo data (only with #demo in the address) ----------
@@ -1021,7 +1031,7 @@ var MOCK = (function () {
 // ---------- Start ----------
 function load() {
   S.error = null; render();
-  api('getState').then(function (st) { S.data = st; render(); })
+  api('getState').then(function (st) { S.data = st; render(); maybeReRegister(); })
     .catch(function (e) { S.error = e && e.message ? e.message : 'Kunne ikke laste.'; render(); });
 }
 if (CONN) load(); else render();
