@@ -1,5 +1,5 @@
 /**
- * Ukeplanen v2.1 – backend (Google Apps Script)
+ * Ukeplanen v2.2 – backend (Google Apps Script)
  *
  * The app itself lives on GitHub Pages. This script stores data in a Google Sheet,
  * syncs to the "Husholdning" calendar / Google Tasks, and sends push notifications.
@@ -51,7 +51,8 @@ const PERSONS = ['p1', 'p2'];
 const ITEM_COLS = ['id', 'date', 'start', 'end', 'title', 'desc', 'who', 'by', 'ok2', 'ok1',
   'status', 'eventId', 'taskId', 'note', 'noteBy', 'src', 'created', 'updated',
   'allDay', 'where', 'whereAddr', 'lat', 'lng', 'mapUrl',
-  'drive', 'driveAt', 'pick', 'pickAt', 'driveEv', 'driveTask', 'pickEv', 'pickTask'];
+  'drive', 'driveAt', 'pick', 'pickAt', 'driveEv', 'driveTask', 'pickEv', 'pickTask',
+  'done', 'thread'];
 const TILE_COLS = ['date', 'key', 'value', 'by', 'updated'];
 const NOTE_COLS = ['id', 'to', 'text', 'itemId', 'created', 'seen'];
 const DEVICE_COLS = ['token', 'person', 'created'];
@@ -171,7 +172,8 @@ const API = {
   saveItem: saveItem_, confirmItem: confirmItem_, undoConfirm: undoConfirm_, changeItem: changeItem_,
   cancelItem: cancelItem_, setTile: setTile_, markSeen: markSeen_, setReminder: setReminder_,
   registerPush: registerPush_, unregisterPush: unregisterPush_,
-  sendMessage: sendMessage_, readMessages: readMessages_
+  sendMessage: sendMessage_, readMessages: readMessages_,
+  markDone: markDone_, addComment: addComment_
 };
 
 function doPost(e) {
@@ -244,7 +246,7 @@ function changeItem_(me, id, f, comment) {
   const c = clean_(f);
   ['date', 'start', 'end', 'title', 'desc', 'who', 'allDay', 'where', 'drive', 'driveAt', 'pick', 'pickAt'].forEach(function (k) { it[k] = c[k]; });
   if (it.where !== oldWhere) Object.assign(it, place_(it.where));
-  if (comment) { it.note = comment; it.noteBy = me; }
+  if (comment) { it.note = comment; it.noteBy = me; addToThread_(it, me, comment); }
   it.updated = nowIso_();
   const other = other_(me);
   if (wasConfirmed) {
@@ -267,10 +269,44 @@ function cancelItem_(me, id, comment) {
   it.status = 'avlyst';
   it.note = comment;
   it.noteBy = me;
+  addToThread_(it, me, comment);
   it.updated = nowIso_();
   saveRow_(it);
   notify_(other_(me), name_(me) + ' avlyste «' + it.title + '» ' + when_(it) + ' – «' + comment + '»', '', 'important');
   return state_(me);
+}
+
+/** Marks an appointment as done (or not). Only shown in the app; the calendar is left as it is. */
+function markDone_(me, id, done) {
+  const it = getItem_(id);
+  it.done = done ? '1' : '';
+  it.updated = nowIso_();
+  saveRow_(it);
+  return state_(me);
+}
+
+/** A reply on an appointment without changing it. */
+function addComment_(me, id, text) {
+  text = String(text || '').trim().slice(0, 1000);
+  if (!text) throw new Error('Skriv en kommentar');
+  const it = getItem_(id);
+  addToThread_(it, me, text);
+  it.updated = nowIso_();
+  saveRow_(it);
+  notify_(other_(me), name_(me) + ' om «' + it.title + '»: ' + text, it.id, 'info');
+  return state_(me);
+}
+
+function threadOf_(it) {
+  let t = [];
+  try { t = it.thread ? JSON.parse(it.thread) : []; } catch (e) { t = []; }
+  if (!t.length && it.note) t = [{ by: it.noteBy, text: it.note, at: '' }];
+  return t;
+}
+function addToThread_(it, by, text) {
+  const t = threadOf_(it);
+  t.push({ by: by, text: text, at: new Date().toISOString() });
+  it.thread = JSON.stringify(t.slice(-50));
 }
 
 function setTile_(me, date, k, value) {
@@ -467,12 +503,18 @@ function importFromCalendar_() {
   const range = window_();
   const events = cal_().getEvents(toDate_(range.from, '00:00'), toDate_(range.to, '23:59'));
   const known = {};
-  readRows_(sheet_('Avtaler'), ITEM_COLS).forEach(function (r) { if (r.eventId) known[r.eventId] = true; });
+  const rows = readRows_(sheet_('Avtaler'), ITEM_COLS);
+  rows.forEach(function (r) {
+    // the app's own driving/pickup events must never come back as new appointments
+    [r.eventId, r.driveEv, r.pickEv].forEach(function (id) { if (id) known[id] = true; });
+  });
+  removeLegDuplicates_(rows);
   const labels = {};
   labels[name_('p1').toLowerCase()] = 'p1'; labels[name_('p2').toLowerCase()] = 'p2'; labels['begge'] = 'both';
   let added = 0;
   events.forEach(function (ev) {
     if (known[ev.getId()] || ev.isRecurringEvent()) return;
+    if (isLegTitle_(ev.getTitle())) return;
     let title = ev.getTitle(), who = 'both';
     const m = title.match(/^([^:]{1,20}):\s*(.+)$/);
     if (m) { who = labels[m[1].trim().toLowerCase()] || m[1].trim(); title = m[2].trim(); }
@@ -483,7 +525,7 @@ function importFromCalendar_() {
       date: Utilities.formatDate(allDay ? ev.getAllDayStartDate() : ev.getStartTime(), CONFIG.TIME_ZONE, 'yyyy-MM-dd'),
       start: allDay ? '' : Utilities.formatDate(ev.getStartTime(), CONFIG.TIME_ZONE, 'HH:mm'),
       end: allDay ? '' : Utilities.formatDate(ev.getEndTime(), CONFIG.TIME_ZONE, 'HH:mm'),
-      title: title, desc: desc, who: who, by: 'p1', ok1: '1', ok2: '', status: 'aktiv',
+      title: title, desc: desc, who: who, by: 'p1', ok1: '1', ok2: '', status: 'aktiv', done: '', thread: '',
       eventId: ev.getId(), taskId: '', note: '', noteBy: '', src: 'kalender',
       created: nowIso_(), updated: nowIso_(), allDay: allDay ? '1' : '', where: ev.getLocation() || ''
     };
@@ -495,13 +537,40 @@ function importFromCalendar_() {
   });
 }
 
+function isLegTitle_(title) { return /^([^:]{1,20}:\s*)?(Kjøre til|Hente fra) /.test(String(title || '')); }
+
+/** v2.1 read the app's own driving/pickup events back as new appointments. Hide those copies (the events stay). */
+function removeLegDuplicates_(rows) {
+  const legIds = {};
+  rows.forEach(function (r) { if (r.driveEv) legIds[r.driveEv] = true; if (r.pickEv) legIds[r.pickEv] = true; });
+  const sh = sheet_('Avtaler');
+  rows.forEach(function (r) {
+    if (r.status === 'avlyst' || r.src !== 'kalender') return;
+    if (legIds[r.eventId] || isLegTitle_(r.title)) {
+      r.status = 'avlyst';
+      r.eventId = '';   // never delete the real driving/pickup event
+      r.note = 'Duplikat av kjøring/henting – fjernet automatisk';
+      writeRow_(sh, ITEM_COLS, r._row, r);
+    }
+  });
+}
+
+/** Run once after updating to v2.2: removes the duplicates and reports how many. */
+function cleanUpDuplicates() {
+  const before = activeItems_().length;
+  removeLegDuplicates_(readRows_(sheet_('Avtaler'), ITEM_COLS));
+  Logger.log('✅ Removed duplicates: ' + (before - activeItems_().length));
+}
+
 // ===================== Places (Hvor?) =====================
 
 /** Turns an address or a Google Maps link into an address, coordinates and a small map. */
 function place_(where) {
   const out = { whereAddr: '', lat: '', lng: '', mapUrl: '' };
   where = String(where || '').trim();
-  if (!where) return out;
+  const isLink = /^https?:\/\//i.test(where);
+  // Long free text is a description, not a place: don't guess a position for it.
+  if (!where || (!isLink && where.length > 80)) return out;
   try {
     let lat = null, lng = null, query = where;
     if (/^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|(www\.)?google\.[a-z.]+\/maps|maps\.google\.)/i.test(where)) {
@@ -523,7 +592,11 @@ function place_(where) {
     } else if (query) {
       res = geo.geocode(query);
       const r = res.results && res.results[0];
-      if (r) {
+      // Skip uncertain matches (partial match, or only a country/region/natural feature)
+      const vague = r && (r.partial_match || (r.types || []).some(function (t) {
+        return ['country', 'administrative_area_level_1', 'administrative_area_level_2', 'natural_feature', 'colloquial_area'].indexOf(t) !== -1;
+      }));
+      if (r && !vague) {
         lat = r.geometry.location.lat; lng = r.geometry.location.lng;
         out.whereAddr = r.formatted_address;
       }
@@ -665,7 +738,8 @@ function state_(me) {
       return { id: it.id, date: it.date, start: it.start, end: it.end, title: it.title, desc: it.desc, who: it.who,
         by: it.by, ok1: !!it.ok1, ok2: !!it.ok2, note: it.note, noteBy: it.noteBy, src: it.src,
         allDay: !!it.allDay, where: it.where, whereAddr: it.whereAddr, lat: it.lat, lng: it.lng, mapUrl: it.mapUrl,
-        drive: it.drive, driveAt: it.driveAt, pick: it.pick, pickAt: it.pickAt };
+        drive: it.drive, driveAt: it.driveAt, pick: it.pick, pickAt: it.pickAt,
+        done: !!it.done, thread: threadOf_(it) };
     }),
     tiles: tiles,
     defaults: CONFIG.DEFAULT_TILES,
