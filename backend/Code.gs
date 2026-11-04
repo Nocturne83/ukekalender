@@ -583,11 +583,11 @@ function push_(p, title, body) {
           webpush: { fcm_options: link ? { link: link } : undefined, notification: { icon: link + 'icons/icon-192.png', badge: link + 'icons/badge-96.png' } }
         } })
       });
-      const code = r.getResponseCode(), body = r.getContentText();
+      const code = r.getResponseCode(), reply = r.getContentText();
       if (code === 200) { ok = true; return; }
       // Only forget a phone when Google says it no longer exists; keep it for any other error.
-      if (code === 404 || /UNREGISTERED/.test(body)) removeDevice_(d.token);
-      const msg = nowIso_() + ' · ' + name_(p) + ' · HTTP ' + code + ' · ' + body.slice(0, 400);
+      if (code === 404 || /UNREGISTERED/.test(reply)) removeDevice_(d.token);
+      const msg = nowIso_() + ' · ' + name_(p) + ' · HTTP ' + code + ' · ' + reply.slice(0, 400);
       PropertiesService.getScriptProperties().setProperty('LAST_PUSH_ERROR', msg);
       console.warn('Push failed: ' + msg);
     });
