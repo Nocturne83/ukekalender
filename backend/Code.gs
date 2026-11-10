@@ -1,5 +1,5 @@
 /**
- * Ukeplanen v2.2 – backend (Google Apps Script)
+ * Ukeplanen v2.3 – backend (Google Apps Script)
  *
  * The app itself lives on GitHub Pages. This script stores data in a Google Sheet,
  * syncs to the "Husholdning" calendar / Google Tasks, and sends push notifications.
@@ -341,7 +341,7 @@ function sendMessage_(me, text) {
   if (!text) throw new Error('Skriv en beskjed');
   appendRow_('Beskjeder', MSG_COLS, { id: 'b' + Date.now().toString(36) + Math.floor(Math.random() * 1000), from: me, text: text, created: new Date().toISOString() });
   setRead_(me);
-  const pushed = push_(other_(me), name_(me), text);
+  const pushed = push_(other_(me), name_(me), text, 'msg');
   if (!pushed) sendMail_(other_(me), CONFIG.APP_NAME + ': beskjed fra ' + name_(me), text);
   return state_(me);
 }
@@ -418,6 +418,12 @@ function syncLeg_(it, leg) {
   const who = it[leg], at = it[leg + 'At'];
   const evK = leg + 'Ev', taskK = leg + 'Task';
   if (!who || !at) {
+    if (it[evK]) { deleteEvent_(it[evK]); it[evK] = ''; }
+    if (it[taskK]) { deleteTask_(it[taskK]); it[taskK] = ''; }
+    return;
+  }
+  // Driving yourself to your own appointment is part of it: no separate entry.
+  if (who === it.who && (who === 'p1' || who === 'p2')) {
     if (it[evK]) { deleteEvent_(it[evK]); it[evK] = ''; }
     if (it[taskK]) { deleteTask_(it[taskK]); it[taskK] = ''; }
     return;
@@ -555,6 +561,22 @@ function removeLegDuplicates_(rows) {
   });
 }
 
+/** Run once after updating to v2.3: removes separate driving/pickup entries on your own appointments. */
+function cleanUpOwnLegs() {
+  let n = 0;
+  readRows_(sheet_('Avtaler'), ITEM_COLS).forEach(function (it) {
+    if (it.status === 'avlyst') return;
+    const own = ['drive', 'pick'].filter(function (leg) {
+      return it[leg] === it.who && (it.who === 'p1' || it.who === 'p2') && (it[leg + 'Ev'] || it[leg + 'Task']);
+    });
+    if (!own.length) return;
+    own.forEach(function (leg) { syncLeg_(it, leg); });
+    saveRow_(it);
+    n += own.length;
+  });
+  Logger.log('✅ Removed own driving/pickup entries: ' + n);
+}
+
 /** Run once after updating to v2.2: removes the duplicates and reports how many. */
 function cleanUpDuplicates() {
   const before = activeItems_().length;
@@ -631,12 +653,14 @@ function notify_(to, text, itemId, kind) {
   if (kind !== 'ask') {
     appendRow_('Varsler', NOTE_COLS, { id: 'v' + Date.now().toString(36) + Math.floor(Math.random() * 1000), to: to, text: text, itemId: itemId || '', created: nowIso_(), seen: '' });
   }
-  const pushed = push_(to, CONFIG.APP_NAME, text);
+  const pushed = push_(to, CONFIG.APP_NAME, text, itemId);
   if (!pushed && kind !== 'info') sendMail_(to, CONFIG.APP_NAME + ': ' + text.slice(0, 70), text);
 }
 
 /** Sends a push to all of a person's devices. Returns true if at least one got it. */
-function push_(p, title, body) {
+function push_(p, title, body, tag) {
+  // Each appointment gets its own tag, so several notifications don't replace each other.
+  tag = String(tag || ('n' + Date.now().toString(36)));
   const sa = prop_('FCM_SERVICE_ACCOUNT');
   if (!sa) return false;
   const devices = readRows_(sheet_('Enheter'), DEVICE_COLS).filter(function (d) { return d.person === p; });
@@ -653,6 +677,7 @@ function push_(p, title, body) {
         payload: JSON.stringify({ message: {
           token: d.token,
           notification: { title: title, body: body },
+          data: { tag: tag },
           webpush: { fcm_options: link ? { link: link } : undefined, notification: { icon: link + 'icons/icon-192.png', badge: link + 'icons/badge-96.png' } }
         } })
       });

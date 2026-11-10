@@ -507,7 +507,7 @@ function planDay(date, d) {
       h += S.adding === date ? itemForm(S.form, 'f', S.formErr, false) : '<button class="addbtn" data-a="startAdd" data-v="' + date + '">' + I.plus + 'Ny avtale</button>';
       var confd = all.filter(isConf);
       if (confd.length) {
-        h += '<div>' + confd.map(function (it) { return oneLine(it, 'goEdit', '', it.done ? 'done' : ''); }).join('') + '</div>';
+        h += '<div>' + confd.map(function (it) { return oneLine(it, 'goItem', '', it.done ? 'done' : ''); }).join('') + '</div>';
       }
       if (tiles.length) {
         h += '<button class="tilerow" data-a="toggleTiles" aria-expanded="' + S.tilesOpen + '"><span class="l">Middag, bil og barnehage</span>' + (tileChanged ? '<span class="tag">Endret</span>' : '') + '<span class="chev' + (S.tilesOpen ? ' up' : '') + '">' + I.down + '</span></button>';
@@ -652,6 +652,8 @@ function afterTime(f, k) {
 }
 function fixEnd(f, k) { if (k === 'start' && f.end && f.end <= f.start) f.end = addMin(f.start, 60); }
 var DRIVE_WORDS = /kjør|kjøre|hent|lever|trening|øving|kamp|turnering|showakademi|bursdag|forestilling|konsert|skyss|flyplass|stasjon/i;
+// A personal appointment is for one adult. Driving yourself there is part of it.
+function isPersonal(f) { return f.who === 'p1' || f.who === 'p2'; }
 function legOptions() { return [me(), other(), 'both', 'grand']; }
 function legChips(f, p, leg) {
   return legOptions().map(function (w) {
@@ -665,6 +667,7 @@ function legBox(f, p) {
     timePicker(f, p, ['driveAt']) +
     '<div class="legrow"><div class="lh"><span>Henter</span>' + timeBtn(f, p, 'pickAt', '') + '</div><div class="row wrap">' + legChips(f, p, 'pick') + '</div></div>' +
     timePicker(f, p, ['pickAt']) +
+    (isPersonal(f) && (f.drive === f.who || f.pick === f.who) ? '<p class="small" style="margin:6px 2px">' + esc(N(f.who)) + ' kjører selv. Det vises i appen, men blir ikke egne oppføringer i kalenderen.</p>' : '') +
     '<button class="link" data-a="hideDrive" data-p="' + p + '">Fjern kjøring og henting</button></div>';
 }
 // Leg times follow the appointment's times until someone picks them by hand.
@@ -1143,7 +1146,7 @@ app.addEventListener('change', function (e) {
   if (key && t.dataset[key] === 'where' && whereLooksLikeText(t.value)) { render(); return; }
   if (!key || (t.dataset[key] !== 'title' && t.dataset[key] !== 'desc')) return;
   var f = key === 'f' ? S.form : S.edit;
-  if (f && !f.showDrive && !f.driveDismissed && DRIVE_WORDS.test((f.title || '') + ' ' + (f.desc || ''))) { f.showDrive = true; legDefaults(f); render(); }
+  if (f && !f.showDrive && !f.driveDismissed && !isPersonal(f) && DRIVE_WORDS.test((f.title || '') + ' ' + (f.desc || ''))) { f.showDrive = true; legDefaults(f); render(); }
 });
 app.addEventListener('keydown', function (e) { if (e.key === 'Enter' && e.target.id === 'linkIn') A.connect(); });
 document.addEventListener('keydown', function (e) {

@@ -1,5 +1,5 @@
 /* Ukeplanen service worker: offline app shell + push notifications. */
-const CACHE = 'ukeplanen-v2.2.0';
+const CACHE = 'ukeplanen-v2.3.0';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/badge-96.png'];
 
 self.addEventListener('install', (e) => {
@@ -35,7 +35,7 @@ self.addEventListener('push', (e) => {
     body: n.body || '',
     icon: n.icon || 'icons/icon-192.png',
     badge: 'icons/badge-96.png',
-    tag: 'ukeplanen',
+    tag: 'ukeplanen-' + ((data.data && data.data.tag) || Date.now()),
     renotify: true,
     data: { link: link }
   }));
