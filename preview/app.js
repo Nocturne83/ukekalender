@@ -1,7 +1,7 @@
 /* Ukeplanen v2.4 – Preact + htm, no build step. */
 import { html, render, useState, useEffect, useLayoutEffect, useRef, useReducer } from '../vendor/preact-htm.module.js';
 
-const VERSION = '2.4.2-preview';
+const VERSION = '2.4.3-preview';
 
 // ---------- Icons ----------
 const sv = (d, w = 20, sw = 2) => '<svg width="' + w + '" height="' + w + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + sw + '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>';
@@ -257,7 +257,7 @@ function ruleDates(rule, start, today, weeksAhead) {
   for (let d = s0; d <= end; d = addDays(d, 1)) {
     const dow = (d.getDay() + 6) % 7;
     let ok;
-    if (rule.preset === 'daily') ok = true;
+    if (rule.preset === 'daily' || rule.every === 0) ok = true;
     else if (rule.preset === 'weekdays') ok = dow < 5;
     else { const wk = Math.round((mondayOf(d) - mon0) / (7 * 86400000)); ok = wk % (rule.every || 1) === 0 && rule.days.indexOf(dow) !== -1; }
     if (ok) out.push(ds(d));
@@ -268,7 +268,7 @@ function makeRule(preset, date, prev) {
   const dow = dayIdx(date), until = (prev && prev.until) || ds(addMonths(pd(date), REP_DEFAULT_MONTHS));
   if (preset === 'weekly') return { preset, every: 1, days: [dow], until };
   if (preset === 'biweekly') return { preset, every: 2, days: [dow], until };
-  if (preset === 'custom') return { preset, every: (prev && prev.every) || 1, days: (prev && prev.days && prev.days.length) ? prev.days.slice() : [dow], until };
+  if (preset === 'custom') return { preset, every: prev && prev.preset === 'custom' ? prev.every : 1, days: (prev && prev.days && prev.days.length) ? prev.days.slice() : [dow], until };
   return { preset, every: 1, days: [], until };
 }
 function addMonths(d, n) { const x = new Date(d.getTime()); x.setMonth(x.getMonth() + n); return x; }
@@ -279,6 +279,7 @@ function ruleText(rule, withUntil) {
   else if (rule.preset === 'weekdays') t = 'Hver ukedag (man–fre)';
   else if (rule.preset === 'weekly') t = 'Hver ' + DAYN[rule.days[0]].toLowerCase();
   else if (rule.preset === 'biweekly') t = 'Annenhver ' + DAYN[rule.days[0]].toLowerCase();
+  else if (rule.every === 0) t = 'Hver dag';
   else t = (rule.every === 1 ? 'Hver uke' : rule.every === 2 ? 'Annenhver uke' : 'Hver ' + rule.every + '. uke') + ': ' + rule.days.slice().sort().map(d => DSHORT[d]).join(', ');
   if (!withUntil) return t;
   const u = pd(rule.until);
@@ -385,7 +386,7 @@ function validate(f) {
   if (f.showDrive && f.drive && !f.driveAt) return 'Velg tid for kjøring.';
   if (f.showDrive && f.pick && !f.pickAt) return 'Velg tid for henting.';
   if (!f.allDay && f.start && f.end && f.end <= f.start) return 'Sluttid må være etter starttid.';
-  if (f.rep && f.rep.preset === 'custom' && !f.rep.days.length) return 'Velg minst én dag for gjentakelsen.';
+  if (f.rep && f.rep.preset === 'custom' && f.rep.every !== 0 && !f.rep.days.length) return 'Velg minst én dag for gjentakelsen.';
   if (f.rep && !f.rep.until) return 'Velg til og med-dato for gjentakelsen.';
   return '';
 }
@@ -470,37 +471,38 @@ const A = {
     if (!it || isTmp(id)) return;
     const both = okOf(it, other());
     const ids = it.seriesId ? S.data.items.filter(i => i.seriesId === it.seriesId && !i.tent).map(i => i.id) : [id];
-    opt(d => { d.items.forEach(i => { if (ids.indexOf(i.id) !== -1) i[okKey(me())] = true; }); }, () => api('confirmItem', id),
+    opt(d => { S.openCard = null; resetCard(); d.items.forEach(i => { if (ids.indexOf(i.id) !== -1) i[okKey(me())] = true; }); }, () => api('confirmItem', id),
       it.seriesId ? 'Bekreftet hele serien' + (both ? ' og lagt i kalenderen' : '') : both ? 'Bekreftet og lagt i kalenderen' : 'Bekreftet', true);
   },
   undo(id) {
-    opt(d => { d.items.forEach(i => { if (i.id === id) i[okKey(me())] = false; }); }, () => api('undoConfirm', id), 'Angret – avtalen er ikke avklart ennå');
+    opt(d => { S.openCard = null; resetCard(); d.items.forEach(i => { if (i.id === id) i[okKey(me())] = false; }); }, () => api('undoConfirm', id), 'Angret – avtalen er ikke avklart ennå');
   },
   edit(id) { const it = findItem(id); if (it && !isTmp(id)) update(() => startEdit(it)); },
   cancelEdit() { update(resetCard); },
   saveEdit(id) {
     const it = findItem(id), f = S.edit;
     let err = validate(f);
-    if (!err && !it.tent && (isConf(it) || it.by !== me()) && !f.comment.trim()) err = 'Skriv kort hvorfor det endres.';
+    if (!err && !it.tent && !f.tent && (isConf(it) || it.by !== me()) && !f.comment.trim()) err = 'Skriv kort hvorfor det endres.';
     const payload = payloadOf(f, f.date);
     const dup = !err && duplicateOf(payload, it.id);
     if (dup) err = '«' + dup.title + '» ' + (dup.start ? 'kl. ' + dup.start : 'hele dagen') + ' finnes allerede den dagen.';
     if (err) { update(s => { s.editErr = err; }); return; }
     if (!f.warn) { const w = clashes(payload, it.id); if (w.length) { update(s => { s.edit.warn = w; s.editErr = ''; }); return; } }
-    const conf = isConf(it), comment = f.comment, scope = S.scope, quiet = !!it.tent;
+    const conf = isConf(it), comment = f.comment, scope = S.scope, quiet = !!it.tent && !!f.tent;
+    const tentOn = !it.tent && !!f.tent, tentOff = !!it.tent && !f.tent;
     const ids = affected(it, scope).map(i => i.id);
     opt(d => {
-      resetCard(); S.week = weekOfDate(f.date);
+      resetCard(); S.openCard = null; S.week = weekOfDate(f.date);
       d.items.forEach(i => {
         if (ids.indexOf(i.id) === -1) return;
         if (i.where !== payload.where) { i.whereAddr = ''; i.mapUrl = ''; i.lat = ''; i.lng = ''; }
         // In a series, later ones keep their own dates.
         Object.assign(i, payload, i.id === it.id ? {} : { date: i.date });
         if (i.id === it.id && comment.trim()) { i.note = comment.trim(); i.noteBy = me(); i.thread = threadOf(i).concat([{ by: me(), text: comment.trim(), at: new Date().toISOString() }]); }
-        if (!conf && !quiet) { i[okKey(me())] = true; i[okKey(other())] = false; }
+        if ((!conf && !quiet) || tentOn || tentOff) { i[okKey(me())] = true; i[okKey(other())] = false; }
       });
     }, () => api('changeItem', it.id, payload, comment, scope),
-      quiet ? 'Lagret' : (ids.length > 1 ? ids.length + ' avtaler endret. ' : conf ? 'Endret. ' : '') + (conf ? N(other()) + ' får beskjed.' : 'Sendt til ' + N(other())), true);
+      quiet ? 'Lagret' : tentOn ? (conf ? 'Tentativ. Fjernet fra kalenderen, og ' + N(other()) + ' får beskjed.' : 'Lagret som tentativ') : tentOff ? 'Sendt til ' + N(other()) : (ids.length > 1 ? ids.length + ' avtaler endret. ' : conf ? 'Endret. ' : '') + (conf ? N(other()) + ' får beskjed.' : 'Sendt til ' + N(other())), true);
   },
   startCancel(id) { if (isTmp(id)) return; update(s => { resetCard(); s.cancelling = id; s.cancelText = ''; }); },
   cancelYes(id) {
@@ -536,7 +538,7 @@ const A = {
     const it = findItem(id), on = S.tentAsk.on, scope = S.scope, ids = affected(it, scope).map(i => i.id);
     const wasConf = isConf(it);
     opt(d => {
-      S.tentAsk = null; S.scope = 'one';
+      S.tentAsk = null; S.scope = 'one'; S.openCard = null;
       d.items.forEach(i => {
         if (ids.indexOf(i.id) === -1) return;
         i.tent = on; i[okKey(me())] = true; i[okKey(other())] = false;
@@ -570,6 +572,7 @@ const A = {
     });
   },
   undoDone(id) {
+    S.openCard = null;
     const it = findItem(id);
     // An appointment that is past its time stays done; untick only works for ticked-off ones.
     if (it && autoDone(Object.assign({}, it, { done: false }))) { toast('Tiden er passert, så den blir stående under Gjennomført.'); return; }
@@ -585,7 +588,7 @@ const A = {
   replySend(id) {
     const text = (S.replyText || '').trim();
     if (!text) return;
-    opt(d => { S.replying = null; S.replyText = ''; d.items.forEach(i => { if (i.id === id) i.thread = threadOf(i).concat([{ by: me(), text, at: new Date().toISOString() }]); }); },
+    opt(d => { S.replying = null; S.replyText = ''; S.openCard = null; d.items.forEach(i => { if (i.id === id) i.thread = threadOf(i).concat([{ by: me(), text, at: new Date().toISOString() }]); }); },
       () => api('addComment', id, text), 'Sendt til ' + N(other()), true);
   },
   tilePick(date, k, v) { opt(d => { S.tileEdit = null; d.tiles[date + '|' + k] = v; }, () => api('setTile', date, k, v)); },
@@ -692,8 +695,8 @@ function SwipeCard({ it }) {
     <div class="under" aria-hidden=${String(off === 0)}><button tabindex=${off === 0 ? -1 : 0} onClick=${() => { setOff(0); A.planDelete(it.id); }}>Slett</button></div>
     <div role="button" tabindex="0" class=${'mini' + (conf ? ' ok' : '') + (it.tent ? ' tent' : '') + (drag ? ' drag' : '')} style=${{ transform: off ? 'translateX(' + off + 'px)' : '' }}
       onPointerDown=${down} onPointerMove=${move} onPointerUp=${up} onPointerCancel=${up} onClick=${click} onKeyDown=${e => { if (e.key === 'Enter') click(); }}>
-      <span class="time">${timeText(it)}</span><span class="ttl">${it.title}</span>
-      <span class="row wrap"><span class=${'chip ' + whoClass(it.who)}>Hvem: ${whoText(it.who)}</span>${statusChip(it)}${it.seriesId ? html`<span class="repmark" title=${ruleText(it.rule, true)}><${Ico} n="rep" /></span>` : null}</span>
+      <span class="ptop"><span class="ttl">${it.title}</span><span class="time">${shortTime(it)}</span></span>
+      <span class="prow"><span class=${'chip ' + whoClass(it.who)}>Hvem: ${whoText(it.who)}</span>${it.seriesId ? html`<span class="repmark" title=${ruleText(it.rule, true)}><${Ico} n="rep" /></span>` : null}<span class="sp"></span>${statusChip(it)}</span>
       ${staleTent(it) ? html`<span class="note">Tiden har passert. Trykk for å avklare.</span>` : null}
       ${ask ? html`<div class="btns" style="margin-top:6px"><button class="btn sm" onClick=${stop(() => openItem(it.id, true))}>Nei, endre</button><button class="btn sm pri" onClick=${stop(() => A.yes(it.id))}>${it.seriesId ? 'Ja, hele serien' : 'Ja, stemmer'}</button></div>` : null}
     </div>
@@ -825,8 +828,11 @@ function PlanDay({ date }) {
   let sum = !all.length ? 'Ingen avtaler'
     : waitMe ? waitMe + ' venter på deg'
     : pend.length ? pend.length + ' venter på ' + N(other())
-    : active.length ? active.length + (active.length === 1 ? ' avtale, bekreftet' : ' avtaler, bekreftet')
+    : active.some(it => !it.tent) ? active.filter(it => !it.tent).length + (active.filter(it => !it.tent).length === 1 ? ' avtale, bekreftet' : ' avtaler, bekreftet')
+    : active.length ? ''
     : done.length + ' gjennomført';
+  const tents = active.filter(it => it.tent).length;
+  if (tents && !isPast) sum = (sum ? sum + ' · ' : '') + tents + ' tentativ' + (tents === 1 ? '' : 'e');
   if (isPast) sum = !all.length ? 'Ingen avtaler' : countLabel(all.length);
   const tiles = isPast ? [] : tileList(date, d);
   const tileChanged = tiles.some(t => t.changed);
@@ -948,8 +954,8 @@ function Actions({ it }) {
   }
   if (it.tent) {
     if (!mine(it)) return html`<span class="small">${N(it.by)} har ikke bestemt seg ennå. Skriv en kommentar hvis det passer dårlig.</span>`;
-    return html`<div class="acts"><button class="btn sm" onClick=${() => A.edit(it.id)}>Endre</button><span class="grow"></span><${TentSwitch} it=${it} /></div>
-      <div class="acts2"><span class="small">Endringer sendes ikke til ${N(other())} mens den er tentativ.</span><button class="link danger" onClick=${() => A.startDelete(it.id)}>Slett</button></div>`;
+    return html`<div class="acts"><button class="btn sm" onClick=${() => A.edit(it.id)}>Endre</button><span class="grow"></span><button class="link danger" onClick=${() => A.startDelete(it.id)}>Slett</button></div>
+      <span class="small">Endringer sendes ikke til ${N(other())} mens den er tentativ.</span>`;
   }
   if (needsMe(it)) {
     const q = it.note && it.noteBy !== me() ? N(it.noteBy) + ' foreslår en endring. Stemmer det?'
@@ -1075,8 +1081,8 @@ function RepeatBox({ f }) {
     <${Collapse} open=${open}>${r ? html`<div class="chooser">
       <div class="row wrap">${presets.map(([k, t]) => html`<button key=${k} type="button" class="wchip c-other" aria-pressed=${String(r.preset === k)} onClick=${() => set(() => { f.rep = makeRule(k, date, r); })}>${t}</button>`)}</div>
       ${r.preset === 'custom' ? html`
-        <fieldset><legend>Hvor ofte</legend><div class="row wrap">${[1, 2, 3, 4].map(n => html`<button key=${n} type="button" class="wchip c-other" aria-pressed=${String(r.every === n)} onClick=${() => set(() => { r.every = n; })}>${n === 1 ? 'Hver uke' : n === 2 ? 'Annenhver uke' : 'Hver ' + n + '. uke'}</button>`)}</div></fieldset>
-        <fieldset><legend>Dager</legend><div class="row daysel">${DLETTER.map((l, i) => html`<button key=${i} type="button" class="wchip c-other dchip" aria-label=${DAYN[i]} aria-pressed=${String(r.days.indexOf(i) !== -1)} onClick=${() => set(() => { const k = r.days.indexOf(i); if (k === -1) r.days.push(i); else r.days.splice(k, 1); })}>${l}</button>`)}</div></fieldset>` : null}
+        <fieldset><legend>Hvor ofte</legend><div class="row wrap">${[0, 1, 2, 3, 4].map(n => html`<button key=${n} type="button" class="wchip c-other" aria-pressed=${String(r.every === n)} onClick=${() => set(() => { r.every = n; })}>${n === 0 ? 'Hver dag' : n === 1 ? 'Hver uke' : n === 2 ? 'Annenhver uke' : 'Hver ' + n + '. uke'}</button>`)}</div></fieldset>
+        ${r.every === 0 ? null : html`<fieldset><legend>Dager</legend><div class="row daysel">${DLETTER.map((l, i) => html`<button key=${i} type="button" class="wchip c-other dchip" aria-label=${DAYN[i]} aria-pressed=${String(r.days.indexOf(i) !== -1)} onClick=${() => set(() => { const k = r.days.indexOf(i); if (k === -1) r.days.push(i); else r.days.splice(k, 1); })}>${l}</button>`)}</div></fieldset>`}` : null}
       <label class="f">Til og med<input class="inp" type="date" min=${date} max=${maxD} value=${r.until} onInput=${e => { const v = e.target.value; set(() => { r.until = v > maxD ? maxD : v; }); }} /></label>
       <span class="small">Senest ett år fram. Avlys enkeltuker ved å avlyse den ene avtalen.</span>
       <button type="button" class="link" onClick=${() => set(() => { f.rep = null; S.repOpen = false; })}>Fjern gjentakelse</button>
@@ -1086,7 +1092,7 @@ function RepeatBox({ f }) {
 function ItemForm({ p, it }) {
   const isEdit = p === 'e', f = formOf(p);
   const err = isEdit ? S.editErr : S.formErr;
-  const needC = isEdit && !it.tent && (isConf(it) || it.by !== me());
+  const needC = isEdit && !it.tent && !f.tent && (isConf(it) || it.by !== me());
   const set = (k, rerender) => e => { f[k] = e.target.value; f.warn = null; if (k === 'title' || k === 'start') S.formDup = null; if (e.target.classList.contains('grow')) grow(e); if (rerender) update(); };
   const onChange = k => e => {
     if (k === 'where' && whereLooksLikeText(e.target.value)) { update(); return; }
@@ -1107,15 +1113,15 @@ function ItemForm({ p, it }) {
     ${isEdit ? null : html`<${RepeatBox} f=${f} />`}
     ${f.showDesc || isEdit ? html`<label class="f">Beskrivelse<textarea class="inp grow" rows=${rowsFor(f.desc)} placeholder="Detaljer" value=${f.desc} onInput=${set('desc')} onChange=${onChange('desc')}></textarea></label>`
       : html`<button class="link" onClick=${() => update(() => { f.showDesc = true; })}>+ Legg til beskrivelse</button>`}
-    ${isEdit ? null : html`<button type="button" class=${'tswitch wide' + (f.tent ? ' on' : '')} role="switch" aria-checked=${String(!!f.tent)} onClick=${() => update(() => { f.tent = !f.tent; })}>
-      <span class="tlabel">Tentativ<span class="small">${f.tent ? ' – ' + N(other()) + ' ser den, men blir ikke spurt ennå' : ' – ikke bestemt ennå'}</span></span><span class="track"><span class="knob"></span></span></button>`}
+    ${isEdit && !mine(it) ? null : html`<button type="button" class=${'tswitch wide' + (f.tent ? ' on' : '')} role="switch" aria-checked=${String(!!f.tent)} onClick=${() => update(() => { f.tent = !f.tent; })}>
+      <span class="tlabel">Tentativ<span class="small">${f.tent ? ' – ' + N(other()) + ' ser den, men blir ikke spurt ennå' : isEdit && it.tent ? ' – slått av: sendes til ' + N(other()) + ' når du lagrer' : ' – ikke bestemt ennå'}</span></span><span class="track"><span class="knob"></span></span></button>`}
     ${isEdit && it.seriesId ? html`<${ScopePick} it=${it} note="Endringen gjelder" />` : null}
     ${isEdit ? html`<label class="f">${needC ? 'Hvorfor endres det?' : 'Kommentar (valgfritt)'}<textarea class="inp grow" rows=${rowsFor(f.comment)} placeholder="F.eks. Jeg må jobbe sent" value=${f.comment} onInput=${set('comment')}></textarea></label>` : null}
     ${f.allDay ? html`<span class="small">Heldagsavtaler legges i Husholdning-kalenderen.</span>` : null}
     ${err ? html`<div class="errbox"><span class="err">${err}</span>${!isEdit && S.formDup ? html`<button class="link" onClick=${() => { const id = S.formDup; update(s => { s.adding = null; s.formErr = ''; s.formDup = null; }); openItem(id); }}>Vis avtalen</button>` : null}</div>` : null}
     ${f.warn ? html`<div class="warn">${f.warn.map((w, i) => html`<span key=${i}>${w}<br /></span>`)}</div>` : null}
     <div class="btns"><button class="btn fixed" onClick=${isEdit ? A.cancelEdit : A.cancelAdd}>Avbryt</button>
-      <button class="btn pri" disabled=${!isEdit && !!S.formDup} onClick=${() => (isEdit ? A.saveEdit(it.id) : A.saveAdd())}>${f.warn ? 'Lagre likevel' : f.tent || (isEdit && it.tent) ? 'Lagre' : 'Send til ' + N(other())}</button></div>
+      <button class="btn pri" disabled=${!isEdit && !!S.formDup} onClick=${() => (isEdit ? A.saveEdit(it.id) : A.saveAdd())}>${f.warn ? 'Lagre likevel' : f.tent ? 'Lagre' : 'Send til ' + N(other())}</button></div>
   </div>`;
 }
 
@@ -1327,12 +1333,14 @@ const MOCK = (() => {
     setTentative: (k, id, on, scope) => { const list = scoped(id, scope), wasConf = list[0].ok1 && list[0].ok2; list.forEach(i => { i.tent = on; i[okF(k)] = true; i[okF(oth(k))] = false; }); if (!on || wasConf) note(oth(k), on ? NAMES[k] + ' er ikke sikker på «' + list[0].title + '» likevel (tentativ)' : NAMES[k] + ' har lagt inn «' + list[0].title + '»', id); return state(k); },
     undoConfirm: (k, id) => { get(id)[okF(k)] = false; return state(k); },
     changeItem: (k, id, f, c, scope) => {
-      const it = get(id), conf = it.ok1 && it.ok2, quiet = it.tent;
+      const it = get(id), conf = it.ok1 && it.ok2, was = !!it.tent, now = !!f.tent, quiet = was && now;
       scoped(id, scope).forEach(i => {
         Object.assign(i, f, i === it ? {} : { date: i.date });
         if (f.where !== i.whereAddr) i.whereAddr = f.where;
-        if (!conf && !quiet) { i[okF(k)] = true; i[okF(oth(k))] = false; }
+        if ((!conf && !quiet) || was !== now) { i[okF(k)] = true; i[okF(oth(k))] = false; }
       });
+      if (!was && now && conf) note(oth(k), NAMES[k] + ' er ikke sikker på «' + it.title + '» likevel (tentativ)', id);
+      if (was && !now) note(oth(k), NAMES[k] + ' har lagt inn «' + it.title + '»', id);
       if (c) { it.note = c; it.noteBy = k; it.thread = (it.thread || []).concat([{ by: k, text: c, at: new Date().toISOString() }]); }
       return state(k);
     },

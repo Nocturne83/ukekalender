@@ -332,3 +332,11 @@ main.anim-prev{animation:fromLeft .34s var(--ease)}
 .legs .ic{vertical-align:-2px}
 .row.daysel{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
 .daysel .dchip{width:auto;min-width:0;padding:0}
+
+/* v2.4.3: compact Plan cards */
+.mini .ptop{display:flex;align-items:baseline;gap:10px}
+.mini .ptop .ttl{flex:1 1 auto;min-width:0}
+.mini .ptop .time{flex:0 0 auto}
+.mini .prow{display:flex;align-items:center;gap:8px;padding-top:6px}
+.mini .prow .sp{flex:1 1 auto}
+.mini{gap:2px}
