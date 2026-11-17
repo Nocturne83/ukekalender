@@ -1,7 +1,7 @@
-/* Ukeplanen v2.4 – Preact + htm, no build step. */
-import { html, render, useState, useEffect, useLayoutEffect, useRef, useReducer } from '../vendor/preact-htm.module.js';
+/* Ukeplanen v2.4 – Preact + htm, no build step. index.html and preview/index.html both load this file. */
+import { html, render, useState, useEffect, useLayoutEffect, useRef, useReducer } from './vendor/preact-htm.module.js';
 
-const VERSION = '2.4.3-preview';
+const VERSION = '2.4.0';
 
 // ---------- Icons ----------
 const sv = (d, w = 20, sw = 2) => '<svg width="' + w + '" height="' + w + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + sw + '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>';
@@ -96,7 +96,7 @@ const addMin = (t, n) => { const p = t.split(':').map(Number), x = (p[0] * 60 + 
 
 // ---------- State ----------
 const S = {
-  data: null, error: null, tab: 'ov', week: 0, weekOpen: false, openDay: null, tilesOpen: false, tileEdit: null, moreWeeks: 0, grp: {},
+  data: null, error: null, tab: 'plan', week: 0, weekOpen: false, openDay: null, tilesOpen: false, tileEdit: null, moreWeeks: 0, grp: {},
   adding: null, form: null, formErr: '', formDup: null, editing: null, edit: null, editErr: '', cancelling: null, cancelText: '', cancelErr: '',
   deleting: null, deleteText: '', deleteErr: '', openCard: null, pastDay: null, replying: null, replyText: '', doneAsk: null, timePick: null,
   scope: 'one', tentAsk: null, repOpen: false, panel: false, toast: null, theme: 'light', pushBusy: false, anim: 'tab', now: Date.now(), msgDraft: '', connErr: ''
@@ -919,7 +919,7 @@ function PlanView() {
   return html`${planWeek(S.week, true)}${moreWeeks(planWeek, ti >= 5)}
     <button class="rem" onClick=${A.cycleRem}><${Ico} n="bellSm" /><span>Påminnelse: <strong>${REM[S.data.reminder]}</strong></span></button>
     <p class="hint">Tips: dra et kort mot venstre for å slette det.</p>
-    ${DEMO ? html`<div class="demo">Mockup med testdata (v${VERSION}). Ingenting lagres.<br /><button onClick=${A.mockSwitch}>Vis som ${N(other())}</button></div>` : null}`;
+    ${DEMO ? html`<div class="demo">${window.UKEPLANEN_FORCE_DEMO ? 'Mockup' : 'Forhåndsvisning'} med testdata (v${VERSION}). Ingenting lagres.<br /><button onClick=${A.mockSwitch}>Vis som ${N(other())}</button></div>` : null}`;
 }
 
 // ----- Ukesoversikt -----
@@ -1180,7 +1180,7 @@ function Panel() {
 function NavBar() {
   const tab = (t, icon, label, badge) => html`<button aria-pressed=${String(S.tab === t)} onClick=${() => A.tab(t)}><${Ico} n=${icon} /><span>${label}</span>${badge ? html`<span class="tabbadge">${badge}</span>` : null}</button>`;
   const unread = S.tab !== 'msg' && S.data.unreadMessages;
-  return html`<nav aria-label="Faner"><div class="in">${tab('ov', 'list', 'Ukesoversikt')}${tab('plan', 'pen', 'Plan')}${tab('msg', 'chat', 'Beskjeder', unread)}</div></nav>`;
+  return html`<nav aria-label="Faner"><div class="in">${tab('plan', 'pen', 'Plan')}${tab('ov', 'list', 'Ukesoversikt')}${tab('msg', 'chat', 'Beskjeder', unread)}</div></nav>`;
 }
 
 function App() {
@@ -1200,7 +1200,9 @@ function App() {
   }
   if (!S.data) return html`<div class="center">Laster…</div>`;
   const view = S.tab === 'plan' ? html`<${PlanView} />` : S.tab === 'msg' ? html`<${MessagesView} />` : html`<${OverviewView} />`;
+  const oldServer = !DEMO && (S.data.apiVersion || 0) < 24;
   return html`<${Header} />
+    ${oldServer ? html`<div class="srvwarn">Skriptet er ikke oppdatert til v2.4 ennå. Sletting, tentative og gjentakende avtaler virker først når det er gjort.</div>` : null}
     <main key=${S.tab + ':' + S.week} class=${'anim-' + S.anim}>${view}</main>
     <${NavBar} />
     <${Panel} />
@@ -1305,7 +1307,7 @@ const MOCK = (() => {
   const get = id => db.items.find(i => i.id === id);
   const scoped = (id, scope) => { const it = get(id); return it.seriesId && scope === 'later' ? db.items.filter(i => i.seriesId === it.seriesId && i.date >= it.date && !i.cancelled) : [it]; };
   const state = p => ({
-    me: p, names: NAMES, today, weeksBack: 2, weeksAhead: 13,
+    apiVersion: 24, me: p, names: NAMES, today, weeksBack: 2, weeksAhead: 13,
     items: db.items.filter(i => !i.cancelled), tiles: db.tiles,
     defaults: { middag: ['p2', 'p2', 'p2', 'p2', 'p2', 'p2', 'p2'], bil: ['p1', 'p1', 'p1', 'p1', 'p1', 'p1', 'p1'], lev: ['p1', 'p1', 'p1', 'p1', 'p1', null, null], hent: ['p2', 'p2', 'p2', 'p2', 'p2', null, null] },
     tileOptions: { middag: ['p2', 'p1', 'both', 'grand', 'takeaway', ''], bil: ['p1', 'p2', 'both', ''], lev: ['p1', 'p2', 'both', 'grand', ''], hent: ['p2', 'p1', 'both', 'grand', ''] },

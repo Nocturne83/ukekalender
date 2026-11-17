@@ -340,3 +340,5 @@ main.anim-prev{animation:fromLeft .34s var(--ease)}
 .mini .prow{display:flex;align-items:center;gap:8px;padding-top:6px}
 .mini .prow .sp{flex:1 1 auto}
 .mini{gap:2px}
+
+.srvwarn{margin:12px 16px 0;padding:10px 12px;border-radius:10px;background:var(--warnBg);border:1px solid var(--warnBd);color:var(--warnT);font-size:13px;font-weight:600;max-width:528px}

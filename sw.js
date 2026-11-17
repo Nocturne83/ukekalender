@@ -1,6 +1,6 @@
 /* Ukeplanen service worker: offline app shell + push notifications. */
-const CACHE = 'ukeplanen-v2.3.0';
-const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/badge-96.png'];
+const CACHE = 'ukeplanen-v2.4.0';
+const SHELL = ['./', 'index.html', 'app.js', 'app.css', 'vendor/preact-htm.module.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/badge-96.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -15,7 +15,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   // Pages and the app shell always come fresh from the network (no browser cache), so updates show at once.
-  const fresh = e.request.mode === 'navigate' || /\/(index\.html)?$/.test(url.pathname) || url.pathname.endsWith('sw.js');
+  const fresh = e.request.mode === 'navigate' || /\/(index\.html)?$/.test(url.pathname) || /\.(js|css)$/.test(url.pathname);
   e.respondWith(
     fetch(fresh ? new Request(e.request, { cache: 'no-store' }) : e.request).then((res) => {
       const copy = res.clone();

@@ -1,5 +1,5 @@
 /**
- * Ukeplanen v2.3 – backend (Google Apps Script)
+ * Ukeplanen v2.4 – backend (Google Apps Script)
  *
  * The app itself lives on GitHub Pages. This script stores data in a Google Sheet,
  * syncs to the "Husholdning" calendar / Google Tasks, and sends push notifications.
@@ -17,7 +17,11 @@
  *  - All-day appointments -> all-day event in the Husholdning calendar.
  *  - Person 1 responsible -> Google Task in person 1's default list (time in the title).
  *  - Anyone else          -> event in the Husholdning calendar.
+ *  - One entry per appointment. Who drives and picks up is written in its description.
+ *  - Tentative appointments are never in the calendar.
  *  - Changes after confirmation need a comment; the other person is notified.
+ *
+ * After updating to v2.4: deploy a new version, then run cleanUpLegs once.
  */
 
 // ===================== Settings (no personal data here) =====================
@@ -46,13 +50,14 @@ const CONFIG = {
 };
 // ===========================================================================
 
+const API_VERSION = 24;
 const PERSONS = ['p1', 'p2'];
 // Column order matters: v1 data uses the same positions.
 const ITEM_COLS = ['id', 'date', 'start', 'end', 'title', 'desc', 'who', 'by', 'ok2', 'ok1',
   'status', 'eventId', 'taskId', 'note', 'noteBy', 'src', 'created', 'updated',
   'allDay', 'where', 'whereAddr', 'lat', 'lng', 'mapUrl',
   'drive', 'driveAt', 'pick', 'pickAt', 'driveEv', 'driveTask', 'pickEv', 'pickTask',
-  'done', 'thread'];
+  'done', 'thread', 'tent', 'seriesId', 'rule'];
 const TILE_COLS = ['date', 'key', 'value', 'by', 'updated'];
 const NOTE_COLS = ['id', 'to', 'text', 'itemId', 'created', 'seen'];
 const DEVICE_COLS = ['token', 'person', 'created'];
@@ -153,7 +158,7 @@ function fixTimes() {
   cal_().setTimeZone(CONFIG.TIME_ZONE);
   let n = 0;
   readRows_(sheet_('Avtaler'), ITEM_COLS).forEach(function (it) {
-    if (it.status === 'avlyst' || !it.eventId || !(it.ok1 && it.ok2)) return;
+    if (isGone_(it) || !it.eventId || !(it.ok1 && it.ok2)) return;
     it.eventId = upsertEvent_(it);
     saveRow_(it);
     n++;
@@ -173,7 +178,8 @@ const API = {
   cancelItem: cancelItem_, setTile: setTile_, markSeen: markSeen_, setReminder: setReminder_,
   registerPush: registerPush_, unregisterPush: unregisterPush_,
   sendMessage: sendMessage_, readMessages: readMessages_,
-  markDone: markDone_, addComment: addComment_
+  markDone: markDone_, addComment: addComment_,
+  deleteItem: deleteItem_, setTentative: setTentative_
 };
 
 function doPost(e) {
@@ -195,29 +201,64 @@ function doPost(e) {
 // ===================== Actions =====================
 
 function saveItem_(me, f) {
-  const it = clean_(f);
-  it.id = 'a' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
-  it.by = me;
-  it[okF_(me)] = '1';
-  it[okF_(other_(me))] = '';
-  it.status = 'aktiv';
-  it.src = 'app';
-  it.created = it.updated = nowIso_();
-  Object.assign(it, place_(it.where));
-  appendRow_('Avtaler', ITEM_COLS, it);
-  notify_(other_(me), name_(me) + ' har lagt inn «' + it.title + '» ' + when_(it) + '. Stemmer det?', it.id, 'ask');
+  const base = clean_(f);
+  const tent = f && f.tent ? '1' : '';
+  const rule = f && f.rep ? cleanRule_(f.rep, base.date) : null;
+  const rows = readRows_(sheet_('Avtaler'), ITEM_COLS);
+  let dates = [base.date];
+  if (rule) {
+    dates = ruleDates_(rule, base.date, window_().to).filter(function (d) { return !duplicateIn_(rows, base, d, ''); });
+    if (!dates.length) throw new Error('«' + base.title + '» finnes allerede på alle datoene.');
+  } else if (duplicateIn_(rows, base, base.date, '')) {
+    throw new Error('«' + base.title + '» ' + (base.start ? 'kl. ' + base.start : '') + ' er allerede lagt inn denne dagen.');
+  }
+  const seriesId = rule ? 's' + Date.now().toString(36) + Math.floor(Math.random() * 1000) : '';
+  const place = place_(base.where);
+  let first = null;
+  dates.forEach(function (d, i) {
+    const it = Object.assign({}, base, place);
+    it.id = 'a' + Date.now().toString(36) + Math.floor(Math.random() * 1000) + (i ? '-' + i : '');
+    it.date = d;
+    it.by = me;
+    it[okF_(me)] = '1';
+    it[okF_(other_(me))] = '';
+    it.status = 'aktiv';
+    it.src = 'app';
+    it.tent = tent;
+    it.seriesId = seriesId;
+    it.rule = rule ? JSON.stringify(rule) : '';
+    it.created = it.updated = nowIso_();
+    appendRow_('Avtaler', ITEM_COLS, it);
+    first = first || it;
+  });
+  // A tentative appointment is visible to the other person, but nobody is asked yet.
+  if (!tent) notify_(other_(me), name_(me) + ' har lagt inn «' + first.title + '» ' + (rule ? ruleText_(rule) + ' fra ' + when_(first) : when_(first)) + '. Stemmer det?', first.id, 'ask');
   return state_(me);
 }
 
+/** Same day, same title (ignoring case and punctuation) and same start time. */
+function duplicateIn_(rows, f, date, selfId) {
+  const n = normTitle_(f.title);
+  return rows.some(function (r) {
+    if (isGone_(r) || r.id === selfId || r.date !== date || normTitle_(r.title) !== n) return false;
+    return f.allDay || !f.start ? (r.allDay || !r.start) : r.start === f.start;
+  });
+}
+function normTitle_(t) { return String(t || '').toLowerCase().replace(/[^a-zæøå0-9]/g, ''); }
+
 function confirmItem_(me, id) {
   const it = getItem_(id);
-  it[okF_(me)] = '1';
-  if (it.ok1 && it.ok2) {
-    sync_(it);
-    notify_(other_(me), name_(me) + ' bekreftet «' + it.title + '» ' + when_(it) + '.', it.id, 'info');
-  }
-  it.updated = nowIso_();
-  saveRow_(it);
+  if (it.tent) throw new Error('Avtalen er tentativ – den kan ikke bekreftes ennå.');
+  // One yes for the whole series.
+  const list = it.seriesId ? seriesRows_(it.seriesId).filter(function (r) { return !isGone_(r) && !r.tent; }) : [it];
+  let synced = false;
+  list.forEach(function (r) {
+    r[okF_(me)] = '1';
+    if (r.ok1 && r.ok2) { sync_(r); synced = true; }
+    r.updated = nowIso_();
+    saveRow_(r);
+  });
+  if (synced) notify_(other_(me), name_(me) + ' bekreftet «' + it.title + '» ' + (it.seriesId ? ruleText_(ruleOf_(it)) : when_(it)) + '.', it.id, 'info');
   return state_(me);
 }
 
@@ -236,44 +277,117 @@ function undoConfirm_(me, id) {
   return state_(me);
 }
 
-function changeItem_(me, id, f, comment) {
+function changeItem_(me, id, f, comment, scope) {
   const it = getItem_(id);
   const wasConfirmed = !!(it.ok1 && it.ok2);
+  const wasTent = !!it.tent;
+  // Only the person who added it can make it tentative.
+  const nowTent = it.by === me ? !!(f && f.tent) : wasTent;
   comment = String(comment || '').trim();
-  if ((wasConfirmed || it.by !== me) && !comment) throw new Error('Skriv kort hvorfor det endres.');
-  const before = summary_(it);
-  const oldWhere = it.where;
+  if (!wasTent && !nowTent && (wasConfirmed || it.by !== me) && !comment) throw new Error('Skriv kort hvorfor det endres.');
   const c = clean_(f);
-  ['date', 'start', 'end', 'title', 'desc', 'who', 'allDay', 'where', 'drive', 'driveAt', 'pick', 'pickAt'].forEach(function (k) { it[k] = c[k]; });
-  if (it.where !== oldWhere) Object.assign(it, place_(it.where));
-  if (comment) { it.note = comment; it.noteBy = me; addToThread_(it, me, comment); }
-  it.updated = nowIso_();
+  const rows = readRows_(sheet_('Avtaler'), ITEM_COLS);
+  if (duplicateIn_(rows, c, c.date, it.id)) throw new Error('«' + c.title + '» finnes allerede den dagen.');
+  const before = summary_(it);
+  const list = scoped_(it, scope);
   const other = other_(me);
-  if (wasConfirmed) {
-    sync_(it);
-    notify_(other, name_(me) + ' endret «' + it.title + '»: ' + diff_(before, summary_(it)) + (comment ? ' – «' + comment + '»' : ''), it.id, 'important');
+  list.forEach(function (r) {
+    const oldWhere = r.where, keepDate = r.date;
+    ['date', 'start', 'end', 'title', 'desc', 'who', 'allDay', 'where', 'drive', 'driveAt', 'pick', 'pickAt'].forEach(function (k) { r[k] = c[k]; });
+    if (r.id !== it.id) r.date = keepDate;   // later ones in a series keep their own dates
+    if (r.where !== oldWhere) Object.assign(r, place_(r.where));
+    if (r.id === it.id && comment) { r.note = comment; r.noteBy = me; addToThread_(r, me, comment); }
+    r.tent = nowTent ? '1' : '';
+    if (nowTent) {
+      if (!wasTent) unsync_(r);
+      r[okF_(me)] = '1'; r[okF_(other)] = '';
+    } else if (wasTent || !wasConfirmed) {
+      r[okF_(me)] = '1'; r[okF_(other)] = '';
+    } else {
+      sync_(r);
+    }
+    r.updated = nowIso_();
+    saveRow_(r);
+  });
+  const many = list.length > 1 ? ' (' + list.length + ' avtaler)' : '';
+  if (wasTent && nowTent) {
+    // tentative: changes are not sent
+  } else if (!wasTent && nowTent) {
+    if (wasConfirmed) notify_(other, name_(me) + ' er ikke sikker på «' + it.title + '» ' + when_(it) + ' likevel. Den er tentativ og fjernet fra kalenderen.' + many, it.id, 'important');
+  } else if (wasTent) {
+    notify_(other, name_(me) + ' har lagt inn «' + it.title + '» ' + when_(it) + many + '. Stemmer det?', it.id, 'ask');
+  } else if (wasConfirmed) {
+    notify_(other, name_(me) + ' endret «' + it.title + '»' + many + ': ' + diff_(before, summary_(it)) + (comment ? ' – «' + comment + '»' : ''), it.id, 'important');
   } else {
-    it[okF_(me)] = '1';
-    it[okF_(other)] = '';
-    notify_(other, name_(me) + ' foreslår en endring på «' + it.title + '» ' + when_(it) + (comment ? ' – «' + comment + '»' : '') + '. Stemmer det?', it.id, 'ask');
+    notify_(other, name_(me) + ' foreslår en endring på «' + it.title + '» ' + when_(it) + many + (comment ? ' – «' + comment + '»' : '') + '. Stemmer det?', it.id, 'ask');
   }
-  saveRow_(it);
   return state_(me);
 }
 
-function cancelItem_(me, id, comment) {
+/** Tentativ on/off. On: out of the calendar, nobody is asked. Off: sent for confirmation. */
+function setTentative_(me, id, on, scope) {
+  const it = getItem_(id);
+  if (it.by !== me) throw new Error('Bare den som la inn avtalen kan gjøre den tentativ.');
+  const wasConfirmed = !!(it.ok1 && it.ok2);
+  const list = scoped_(it, scope);
+  list.forEach(function (r) {
+    if (on) unsync_(r);
+    r.tent = on ? '1' : '';
+    r[okF_(me)] = '1';
+    r[okF_(other_(me))] = '';
+    r.updated = nowIso_();
+    saveRow_(r);
+  });
+  const many = list.length > 1 ? ' (' + list.length + ' avtaler)' : '';
+  if (on && wasConfirmed) notify_(other_(me), name_(me) + ' er ikke sikker på «' + it.title + '» ' + when_(it) + ' likevel. Den er tentativ og fjernet fra kalenderen.' + many, it.id, 'important');
+  if (!on) notify_(other_(me), name_(me) + ' har lagt inn «' + it.title + '» ' + when_(it) + many + '. Stemmer det?', it.id, 'ask');
+  return state_(me);
+}
+
+function cancelItem_(me, id, comment, scope) {
   const it = getItem_(id);
   comment = String(comment || '').trim();
   if (!comment) throw new Error('Skriv kort hvorfor det avlyses.');
-  unsync_(it);
-  it.status = 'avlyst';
-  it.note = comment;
-  it.noteBy = me;
-  addToThread_(it, me, comment);
-  it.updated = nowIso_();
-  saveRow_(it);
-  notify_(other_(me), name_(me) + ' avlyste «' + it.title + '» ' + when_(it) + ' – «' + comment + '»', '', 'important');
+  const list = endItems_(it, scope, 'avlyst', me, comment);
+  notify_(other_(me), name_(me) + ' avlyste «' + it.title + '» ' + when_(it) + (list.length > 1 ? ' og senere (' + list.length + ' avtaler)' : '') + ' – «' + comment + '»', '', 'important');
   return state_(me);
+}
+
+/**
+ * Removes an appointment completely (e.g. added twice). Your own can go quietly;
+ * someone else's needs a reason, and they are told.
+ */
+function deleteItem_(me, id, reason, silent, scope) {
+  const it = getItem_(id);
+  reason = String(reason || '').trim();
+  if (it.by !== me) silent = false;
+  if (!silent && !reason) throw new Error('Skriv kort hvorfor den slettes.');
+  const list = endItems_(it, scope, 'slettet', me, reason);
+  if (!silent) notify_(other_(me), name_(me) + ' slettet «' + it.title + '» ' + when_(it) + (list.length > 1 ? ' og senere (' + list.length + ' avtaler)' : '') + ' – «' + reason + '»', '', 'important');
+  return state_(me);
+}
+
+/** Cancels or deletes one appointment, or this and the later ones in its series. */
+function endItems_(it, scope, status, me, text) {
+  const list = scoped_(it, scope);
+  list.forEach(function (r) {
+    unsync_(r);
+    r.status = status;
+    if (text) { r.note = text; r.noteBy = me; }
+    r.updated = nowIso_();
+    saveRow_(r);
+  });
+  // "This and later": the series ends the day before, so no new ones are made.
+  if (it.seriesId && scope === 'later') {
+    const rule = ruleOf_(it);
+    rule.until = shiftDate_(it.date, -1);
+    seriesRows_(it.seriesId).forEach(function (r) {
+      if (isGone_(r)) return;
+      r.rule = JSON.stringify(rule);
+      saveRow_(r);
+    });
+  }
+  return list;
 }
 
 /** Marks an appointment as done (or not). Only shown in the app; the calendar is left as it is. */
@@ -341,7 +455,7 @@ function sendMessage_(me, text) {
   if (!text) throw new Error('Skriv en beskjed');
   appendRow_('Beskjeder', MSG_COLS, { id: 'b' + Date.now().toString(36) + Math.floor(Math.random() * 1000), from: me, text: text, created: new Date().toISOString() });
   setRead_(me);
-  const pushed = push_(other_(me), name_(me), text, 'msg');
+  const pushed = push_(other_(me), name_(me), text, 'msg-' + Date.now().toString(36));
   if (!pushed) sendMail_(other_(me), CONFIG.APP_NAME + ': beskjed fra ' + name_(me), text);
   return state_(me);
 }
@@ -370,13 +484,14 @@ function unregisterPush_(me, token) {
 function hourlyReminder() {
   const now = new Date();
   if (Number(Utilities.formatDate(now, CONFIG.TIME_ZONE, 'H')) === 3) cleanMessages_();
+  if (Number(Utilities.formatDate(now, CONFIG.TIME_ZONE, 'H')) === 2) withLock_(topUpSeries);
   if (Number(Utilities.formatDate(now, CONFIG.TIME_ZONE, 'H')) !== CONFIG.REMINDER_HOUR) return;
   const isSunday = Utilities.formatDate(now, CONFIG.TIME_ZONE, 'u') === '7';
   const items = activeItems_();
   PERSONS.forEach(function (p) {
     const mode = prop_('REM_' + p) || 'sunday';
     if (mode === 'off' || (mode === 'sunday' && !isSunday)) return;
-    const waiting = items.filter(function (it) { return !it[okF_(p)]; }).length;
+    const waiting = items.filter(function (it) { return !it.tent && !it[okF_(p)]; }).length;
     const text = (isSunday ? 'Husk å legge inn planene for neste uke.' : 'Har du noe nytt å legge inn?') +
       (waiting ? ' ' + waiting + ' ting venter på svar fra deg.' : '');
     if (!push_(p, CONFIG.APP_NAME, text)) sendMail_(p, CONFIG.APP_NAME + ': påminnelse', text);
@@ -392,8 +507,9 @@ function cleanMessages_() {
 // ===================== Calendar / Tasks sync =====================
 
 function sync_(it) {
-  syncLeg_(it, 'drive');
-  syncLeg_(it, 'pick');
+  if (it.tent) { unsync_(it); return; }
+  // v2.4: one entry per appointment. Remove any old separate driving/pickup entries.
+  removeLegs_(it);
   const asTask = it.who === 'p1' && !it.allDay && it.src !== 'kalender';
   if (asTask) {
     if (it.eventId) { deleteEvent_(it.eventId); it.eventId = ''; }
@@ -407,41 +523,20 @@ function sync_(it) {
 function unsync_(it) {
   if (it.eventId) { deleteEvent_(it.eventId); it.eventId = ''; }
   if (it.taskId) { deleteTask_(it.taskId); it.taskId = ''; }
+  removeLegs_(it);
+}
+
+function removeLegs_(it) {
   ['drive', 'pick'].forEach(function (leg) {
     if (it[leg + 'Ev']) { deleteEvent_(it[leg + 'Ev']); it[leg + 'Ev'] = ''; }
     if (it[leg + 'Task']) { deleteTask_(it[leg + 'Task']); it[leg + 'Task'] = ''; }
   });
 }
 
-/** Driving there / picking up: its own short event (or task for person 1) at the chosen time. */
-function syncLeg_(it, leg) {
-  const who = it[leg], at = it[leg + 'At'];
-  const evK = leg + 'Ev', taskK = leg + 'Task';
-  if (!who || !at) {
-    if (it[evK]) { deleteEvent_(it[evK]); it[evK] = ''; }
-    if (it[taskK]) { deleteTask_(it[taskK]); it[taskK] = ''; }
-    return;
-  }
-  // Driving yourself to your own appointment is part of it: no separate entry.
-  if (who === it.who && (who === 'p1' || who === 'p2')) {
-    if (it[evK]) { deleteEvent_(it[evK]); it[evK] = ''; }
-    if (it[taskK]) { deleteTask_(it[taskK]); it[taskK] = ''; }
-    return;
-  }
-  const legIt = {
-    date: it.date, start: at, end: '', allDay: '', who: who,
-    title: (leg === 'drive' ? 'Kjøre til ' : 'Hente fra ') + it.title,
-    desc: it.desc, where: it.where, whereAddr: it.whereAddr, note: '',
-    eventId: it[evK], taskId: it[taskK]
-  };
-  if (who === 'p1') {
-    if (it[evK]) { deleteEvent_(it[evK]); it[evK] = ''; }
-    it[taskK] = upsertTask_(legIt);
-  } else {
-    if (it[taskK]) { deleteTask_(it[taskK]); it[taskK] = ''; }
-    legIt.end = addMin_(at, 30);
-    it[evK] = upsertEvent_(legIt);
-  }
+/** "Kjører dit: Maria kl. 16:30" / "Henter: Sui kl. 18:00" for the description. */
+function legsText_(it) {
+  return [it.drive && it.driveAt ? 'Kjører dit: ' + whoLabel_(it.drive) + ' kl. ' + it.driveAt : '',
+    it.pick && it.pickAt ? 'Henter: ' + whoLabel_(it.pick) + ' kl. ' + it.pickAt : ''].filter(String).join('\n');
 }
 
 function cal_() {
@@ -453,7 +548,7 @@ function cal_() {
 function eventTitle_(it) { return whoLabel_(it.who) + ': ' + it.title; }
 
 function eventDesc_(it) {
-  return [it.desc, it.whereAddr || it.where ? 'Hvor: ' + (it.whereAddr || it.where) : '', it.note ? 'Sist endret: ' + it.note : '', 'Fra ' + CONFIG.APP_NAME]
+  return [it.desc, legsText_(it), it.whereAddr || it.where ? 'Hvor: ' + (it.whereAddr || it.where) : '', it.note ? 'Sist endret: ' + it.note : '', 'Fra ' + CONFIG.APP_NAME]
     .filter(String).join('\n');
 }
 
@@ -484,7 +579,7 @@ function deleteEvent_(id) {
 function upsertTask_(it) {
   const res = {
     title: (it.start ? it.start + (it.end ? '–' + it.end : '') + ' ' : '') + it.title,
-    notes: [it.desc, it.whereAddr || it.where ? 'Hvor: ' + (it.whereAddr || it.where) : '', it.note ? 'Sist endret: ' + it.note : ''].filter(String).join('\n'),
+    notes: [it.desc, legsText_(it), it.whereAddr || it.where ? 'Hvor: ' + (it.whereAddr || it.where) : '', it.note ? 'Sist endret: ' + it.note : ''].filter(String).join('\n'),
     due: it.date + 'T00:00:00.000Z'
   };
   try {
@@ -525,7 +620,7 @@ function importFromCalendar_() {
     const m = title.match(/^([^:]{1,20}):\s*(.+)$/);
     if (m) { who = labels[m[1].trim().toLowerCase()] || m[1].trim(); title = m[2].trim(); }
     const allDay = ev.isAllDayEvent();
-    const desc = (ev.getDescription() || '').replace(/\n?Fra Ukeplanen\s*$/, '');
+    const desc = (ev.getDescription() || '').replace(/\n?Fra Ukeplanen\s*$/, '').replace(/^(Kjører dit|Henter): .*$\n?/gm, '');
     const it = {
       id: 'k' + Date.now().toString(36) + added,
       date: Utilities.formatDate(allDay ? ev.getAllDayStartDate() : ev.getStartTime(), CONFIG.TIME_ZONE, 'yyyy-MM-dd'),
@@ -551,7 +646,7 @@ function removeLegDuplicates_(rows) {
   rows.forEach(function (r) { if (r.driveEv) legIds[r.driveEv] = true; if (r.pickEv) legIds[r.pickEv] = true; });
   const sh = sheet_('Avtaler');
   rows.forEach(function (r) {
-    if (r.status === 'avlyst' || r.src !== 'kalender') return;
+    if (isGone_(r) || r.src !== 'kalender') return;
     if (legIds[r.eventId] || isLegTitle_(r.title)) {
       r.status = 'avlyst';
       r.eventId = '';   // never delete the real driving/pickup event
@@ -561,21 +656,26 @@ function removeLegDuplicates_(rows) {
   });
 }
 
-/** Run once after updating to v2.3: removes separate driving/pickup entries on your own appointments. */
-function cleanUpOwnLegs() {
-  let n = 0;
+/**
+ * Run once after updating to v2.4: removes all separate driving/pickup entries
+ * and writes who drives and picks up into the appointment's own entry instead.
+ */
+function cleanUpLegs() {
+  let legs = 0, updated = 0;
   readRows_(sheet_('Avtaler'), ITEM_COLS).forEach(function (it) {
-    if (it.status === 'avlyst') return;
-    const own = ['drive', 'pick'].filter(function (leg) {
-      return it[leg] === it.who && (it.who === 'p1' || it.who === 'p2') && (it[leg + 'Ev'] || it[leg + 'Task']);
-    });
-    if (!own.length) return;
-    own.forEach(function (leg) { syncLeg_(it, leg); });
+    if (isGone_(it)) return;
+    const had = ['driveEv', 'driveTask', 'pickEv', 'pickTask'].filter(function (k) { return it[k]; }).length;
+    if (!had && !(it.drive || it.pick)) return;
+    legs += had;
+    removeLegs_(it);
+    if (it.ok1 && it.ok2 && !it.tent && (it.eventId || it.taskId)) { sync_(it); updated++; }
     saveRow_(it);
-    n += own.length;
   });
-  Logger.log('✅ Removed own driving/pickup entries: ' + n);
+  Logger.log('✅ Removed driving/pickup entries: ' + legs + '. Appointments updated with driving/pickup in the description: ' + updated);
 }
+
+/** Older name, kept so the v2.3 guide still works. */
+function cleanUpOwnLegs() { cleanUpLegs(); }
 
 /** Run once after updating to v2.2: removes the duplicates and reports how many. */
 function cleanUpDuplicates() {
@@ -678,7 +778,8 @@ function push_(p, title, body, tag) {
           token: d.token,
           notification: { title: title, body: body },
           data: { tag: tag },
-          webpush: { fcm_options: link ? { link: link } : undefined, notification: { icon: link + 'icons/icon-192.png', badge: link + 'icons/badge-96.png' } }
+          // Urgency high: delivered at once, also when the phone is asleep.
+          webpush: { headers: { Urgency: 'high', TTL: '86400' }, fcm_options: link ? { link: link } : undefined, notification: { icon: link + 'icons/icon-192.png', badge: link + 'icons/badge-96.png' } }
         } })
       });
       const code = r.getResponseCode(), reply = r.getContentText();
@@ -754,6 +855,7 @@ function state_(me) {
     if (prop_('FIREBASE_CONFIG') && prop_('FIREBASE_VAPID')) firebase = { config: parseConfig_(prop_('FIREBASE_CONFIG')), vapidKey: prop_('FIREBASE_VAPID').trim() };
   } catch (err) { console.warn('FIREBASE_CONFIG is not valid JSON'); }
   return {
+    apiVersion: API_VERSION,
     me: me,
     names: { p1: name_('p1'), p2: name_('p2') },
     today: Utilities.formatDate(new Date(), CONFIG.TIME_ZONE, 'yyyy-MM-dd'),
@@ -764,7 +866,7 @@ function state_(me) {
         by: it.by, ok1: !!it.ok1, ok2: !!it.ok2, note: it.note, noteBy: it.noteBy, src: it.src,
         allDay: !!it.allDay, where: it.where, whereAddr: it.whereAddr, lat: it.lat, lng: it.lng, mapUrl: it.mapUrl,
         drive: it.drive, driveAt: it.driveAt, pick: it.pick, pickAt: it.pickAt,
-        done: !!it.done, thread: threadOf_(it) };
+        done: !!it.done, thread: threadOf_(it), tent: !!it.tent, seriesId: it.seriesId || '', rule: it.rule ? ruleOf_(it) : null };
     }),
     tiles: tiles,
     defaults: CONFIG.DEFAULT_TILES,
@@ -779,7 +881,7 @@ function state_(me) {
 }
 
 function activeItems_() {
-  return readRows_(sheet_('Avtaler'), ITEM_COLS).filter(function (it) { return it.status !== 'avlyst'; });
+  return readRows_(sheet_('Avtaler'), ITEM_COLS).filter(function (it) { return !isGone_(it); });
 }
 
 function window_() {
@@ -791,7 +893,108 @@ function window_() {
   return { from: Utilities.formatDate(from, CONFIG.TIME_ZONE, 'yyyy-MM-dd'), to: Utilities.formatDate(to, CONFIG.TIME_ZONE, 'yyyy-MM-dd') };
 }
 
+// ===================== Repeating appointments =====================
+// rule = { preset: 'daily'|'weekdays'|'weekly'|'biweekly'|'custom', every: 0-4 (0 = every day), days: [0-6, Monday = 0], until: 'yyyy-MM-dd' }
+
+function cleanRule_(r, start) {
+  r = r || {};
+  const presets = ['daily', 'weekdays', 'weekly', 'biweekly', 'custom'];
+  const rule = {
+    preset: presets.indexOf(r.preset) !== -1 ? r.preset : 'weekly',
+    every: Math.max(0, Math.min(4, Number(r.every) || 0)),
+    days: (Array.isArray(r.days) ? r.days : []).map(Number).filter(function (d) { return d >= 0 && d <= 6; }),
+    until: String(r.until || '')
+  };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(rule.until)) throw new Error('Velg til og med-dato for gjentakelsen.');
+  const max = shiftDate_(start, 365);
+  if (rule.until > max) rule.until = max;
+  if (rule.until < start) throw new Error('Til og med-datoen er før avtalen.');
+  if ((rule.preset === 'weekly' || rule.preset === 'biweekly' || (rule.preset === 'custom' && rule.every > 0)) && !rule.days.length) throw new Error('Velg minst én dag for gjentakelsen.');
+  if (rule.preset === 'weekly') rule.every = 1;
+  if (rule.preset === 'biweekly') rule.every = 2;
+  return rule;
+}
+
+/** The dates of a series from start, up to its end date or the planning horizon. */
+function ruleDates_(rule, start, horizon) {
+  const out = [], end = rule.until < horizon ? rule.until : horizon;
+  const mon0 = mondayOf_(start);
+  for (let d = start; d <= end; d = shiftDate_(d, 1)) {
+    const dow = dowOf_(d);
+    let ok;
+    if (rule.preset === 'daily' || (rule.preset === 'custom' && rule.every === 0)) ok = true;
+    else if (rule.preset === 'weekdays') ok = dow < 5;
+    else ok = (daysBetween_(mon0, mondayOf_(d)) / 7) % (rule.every || 1) === 0 && rule.days.indexOf(dow) !== -1;
+    if (ok) out.push(d);
+  }
+  return out;
+}
+
+function ruleText_(rule) {
+  if (!rule) return '';
+  let t;
+  if (rule.preset === 'daily' || (rule.preset === 'custom' && rule.every === 0)) t = 'hver dag';
+  else if (rule.preset === 'weekdays') t = 'hver ukedag';
+  else if (rule.preset === 'weekly') t = 'hver ' + DAY_NAMES[rule.days[0]];
+  else if (rule.preset === 'biweekly') t = 'annenhver ' + DAY_NAMES[rule.days[0]];
+  else t = (rule.every === 1 ? 'hver uke' : rule.every === 2 ? 'annenhver uke' : 'hver ' + rule.every + '. uke') + ' (' + rule.days.slice().sort().map(function (d) { return DAY_NAMES[d].slice(0, 3); }).join(', ') + ')';
+  const p = rule.until.split('-').map(Number);
+  return t + ' til ' + p[2] + '. ' + MONTHS[p[1] - 1] + ' ' + p[0];
+}
+
+function ruleOf_(it) { try { return JSON.parse(it.rule); } catch (e) { return null; } }
+function seriesRows_(sid) { return readRows_(sheet_('Avtaler'), ITEM_COLS).filter(function (r) { return r.seriesId === sid; }); }
+/** This one, or this and the later ones in its series. */
+function scoped_(it, scope) {
+  if (!it.seriesId || scope !== 'later') return [it];
+  return seriesRows_(it.seriesId).filter(function (r) { return !isGone_(r) && r.date >= it.date; });
+}
+
+/**
+ * Runs at night from hourlyReminder: adds the next occurrences of each series so it
+ * always reaches the planning horizon, until its end date.
+ */
+function topUpSeries() {
+  const horizon = window_().to;
+  const bySeries = {};
+  readRows_(sheet_('Avtaler'), ITEM_COLS).forEach(function (r) {
+    if (!r.seriesId) return;
+    // The last row of a series, cancelled ones included, so a cancelled week is not made again.
+    if (!bySeries[r.seriesId] || r.date > bySeries[r.seriesId].date) bySeries[r.seriesId] = r;
+  });
+  let added = 0;
+  Object.keys(bySeries).forEach(function (sid) {
+    const last = bySeries[sid], rule = ruleOf_(last);
+    if (!rule) return;
+    const template = seriesRows_(sid).filter(function (r) { return !isGone_(r); }).sort(function (a, b) { return a.date < b.date ? 1 : -1; })[0];
+    if (!template) return;
+    ruleDates_(rule, shiftDate_(last.date, 1), horizon).forEach(function (d, i) {
+      const it = {};
+      ITEM_COLS.forEach(function (c) { it[c] = template[c]; });
+      Object.assign(it, { id: 'a' + Date.now().toString(36) + Math.floor(Math.random() * 1000) + '-' + i, date: d, eventId: '', taskId: '',
+        driveEv: '', driveTask: '', pickEv: '', pickTask: '', done: '', thread: '', note: '', noteBy: '', status: 'aktiv', created: nowIso_(), updated: nowIso_() });
+      if (it.ok1 && it.ok2 && !it.tent) sync_(it);
+      appendRow_('Avtaler', ITEM_COLS, it);
+      added++;
+    });
+  });
+  Logger.log('Series: ' + added + ' new appointments');
+}
+
 // ===================== Helpers =====================
+
+function isGone_(it) { return it.status === 'avlyst' || it.status === 'slettet'; }
+function shiftDate_(ds, n) {
+  const p = ds.split('-').map(Number);
+  const d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n));
+  return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2);
+}
+function dowOf_(ds) { const p = ds.split('-').map(Number); return (new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay() + 6) % 7; }
+function mondayOf_(ds) { return shiftDate_(ds, -dowOf_(ds)); }
+function daysBetween_(a, b) {
+  const pa = a.split('-').map(Number), pb = b.split('-').map(Number);
+  return Math.round((Date.UTC(pb[0], pb[1] - 1, pb[2]) - Date.UTC(pa[0], pa[1] - 1, pa[2])) / 86400000);
+}
 
 /** Accepts the firebaseConfig exactly as Firebase shows it (JavaScript), or as JSON. */
 function parseConfig_(s) {
@@ -939,7 +1142,7 @@ function appendRow_(name, cols, obj) {
 
 function getItem_(id) {
   const it = readRows_(sheet_('Avtaler'), ITEM_COLS).filter(function (r) { return r.id === id; })[0];
-  if (!it || it.status === 'avlyst') throw new Error('Fant ikke avtalen');
+  if (!it || isGone_(it)) throw new Error('Fant ikke avtalen');
   return it;
 }
 
