@@ -299,3 +299,15 @@ main.anim-prev{animation:fromLeft .34s var(--ease)}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation:none !important;transition:none !important}
 }
+
+/* v2.4.1 */
+.mini[role="button"]{cursor:pointer;user-select:none;-webkit-user-select:none}
+.mini .btns .btn.sm{min-height:40px}
+.donesec{margin:0 -16px;padding:10px 16px 12px;border-bottom:1px solid var(--border)}
+.donesec .pastgrp{min-height:44px;padding:8px 12px}
+.dets.donedets{padding:10px 12px 12px;margin-top:-2px;border:1px solid var(--border);border-top:0;border-radius:0 0 10px 10px;background:var(--surf)}
+.lline[aria-expanded="true"]{border-bottom-left-radius:0;border-bottom-right-radius:0}
+.wkgrp{margin-top:6px}
+.wkgrp .pastgrp .l{display:flex;flex-direction:column;gap:2px}
+.wkl{font-size:16px;font-weight:700}
+.wkn{font-size:13px;font-weight:500;color:var(--muted)}

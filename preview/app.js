@@ -1,7 +1,7 @@
 /* Ukeplanen v2.4 – Preact + htm, no build step. */
 import { html, render, useState, useEffect, useLayoutEffect, useRef, useReducer } from '../vendor/preact-htm.module.js';
 
-const VERSION = '2.4.0-preview';
+const VERSION = '2.4.1-preview';
 
 // ---------- Icons ----------
 const sv = (d, w = 20, sw = 2) => '<svg width="' + w + '" height="' + w + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + sw + '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>';
@@ -38,6 +38,7 @@ const REM_NEXT = { sunday: 'daily', daily: 'off', off: 'sunday' };
 const FB_VERSION = '10.12.2';
 const DONE_AFTER_MIN = 60; // an appointment counts as done one hour after it ends
 const UNDO_MS = 5000;
+const WORK_FROM = 8 * 60, WORK_TO = 16 * 60; // car warning only between 08:00 and 16:00
 
 // ---------- Connection ----------
 const CONN_KEY = 'ukeplanen-conn';
@@ -236,7 +237,14 @@ function duplicateOf(payload, selfId) {
   return S.data.items.find(o => o.id !== selfId && o.date === payload.date && norm(o.title) === norm(payload.title) &&
     (payload.allDay || !payload.start ? (o.allDay || !o.start) : o.start === payload.start));
 }
-function similar(a, b) { a = norm(a); b = norm(b); return a.length >= 4 && b.length >= 4 && (a.indexOf(b) >= 0 || b.indexOf(a) >= 0); }
+// Similar = every word of the shorter title is also a whole word in the longer one ("Pokemon showcase" vs "Pokemon Showcase Arian").
+const words = t => String(t || '').toLowerCase().split(/[^a-zæøå0-9]+/).filter(w => w.length > 1);
+function similar(a, b) {
+  let x = words(a), y = words(b);
+  if (!x.length || !y.length) return false;
+  if (x.length > y.length) { const t = x; x = y; y = t; }
+  return x.every(w => y.indexOf(w) !== -1);
+}
 function slots(x) {
   const out = [];
   if (!x.allDay && x.start) out.push({ who: x.who, a: mins(x.start), b: x.end ? mins(x.end) : mins(x.start) + 60, what: x.title });
@@ -258,8 +266,10 @@ function clashes(payload, selfId) {
   const car = tileList(payload.date, dayIdx(payload.date)).find(t => t.k === 'bil');
   if (car && car.val && car.val !== 'both') {
     ['drive', 'pick'].forEach(leg => {
-      const w = payload[leg];
-      if ((w === 'p1' || w === 'p2') && w !== car.val) add(whoLabel(w) + ' skal kjøre, men ' + whoLabel(car.val) + ' har bilen denne dagen.');
+      const w = payload[leg], at = payload[leg + 'At'];
+      // Only during working hours: after 16:00 the car is home anyway.
+      const workHours = at && mins(at) >= WORK_FROM && mins(at) < WORK_TO;
+      if (workHours && (w === 'p1' || w === 'p2') && w !== car.val) add(whoLabel(w) + ' skal kjøre, men ' + whoLabel(car.val) + ' har bilen denne dagen.');
     });
   }
   return warn;
@@ -302,7 +312,7 @@ function openItem(id, edit) {
   update(s => {
     s.panel = false; s.anim = s.tab === 'ov' ? s.anim : 'tab'; s.tab = 'ov'; s.week = weekOfDate(it.date); s.weekOpen = false; s.moreWeeks = 0;
     if (it.date < s.data.today) { s.grp.ovPast = true; s.pastDay = it.date; }
-    else if (it.date === s.data.today && isDone(it)) s.grp['done|' + it.date] = true;
+    else if (isDone(it)) s.grp['done|' + it.date] = true;
     resetCard();
     s.openCard = id;
     if (edit) startEdit(it);
@@ -418,7 +428,8 @@ const A = {
     });
   },
   // Delete from Ukesoversikt: asks for a reason, and the other person is told.
-  startDelete(id) { if (isTmp(id)) return; update(s => { resetCard(); s.deleting = id; s.deleteText = ''; }); },
+  startDelete(id) { if (isTmp(id)) return; update(s => { resetCard(); s.deleting = id; s.deleteText = ''; s.deleteErr = ''; }); },
+  planDelete(id) { const it = findItem(id); if (!it) return; if (it.by === me()) A.quietDelete(id); else A.startDelete(id); },
   deleteYes(id) {
     const text = S.deleteText.trim();
     if (!text) { update(s => { s.deleteErr = 'Skriv kort hvorfor.'; }); return; }
@@ -547,6 +558,7 @@ function SwipeCard({ it }) {
   const st = useRef({ x0: null, y0: 0, lock: null, base: 0, moved: false });
   const [off, setOff] = useState(0);
   const [drag, setDrag] = useState(false);
+  if (S.deleting === it.id) return html`<div class="swipe" data-flip=${it.id}><${DeleteBox} it=${it} /></div>`;
   const down = e => { const s = st.current; s.x0 = e.clientX; s.y0 = e.clientY; s.lock = null; s.base = off; s.moved = false; };
   const move = e => {
     const s = st.current;
@@ -571,14 +583,42 @@ function SwipeCard({ it }) {
     if (off !== 0) { setOff(0); return; }
     openItem(it.id, false);
   };
-  const conf = isConf(it);
+  const stop = fn => e => { e.stopPropagation(); if (st.current.moved) { st.current.moved = false; return; } fn(); };
+  const conf = isConf(it), ask = needsMe(it) && !isTmp(it.id);
   return html`<div class="swipe" data-flip=${it.id}>
-    <div class="under" aria-hidden=${String(off === 0)}><button tabindex=${off === 0 ? -1 : 0} onClick=${() => A.quietDelete(it.id)}>Slett</button></div>
-    <button class=${'mini' + (conf ? ' ok' : '') + (drag ? ' drag' : '')} style=${{ transform: off ? 'translateX(' + off + 'px)' : '' }}
-      onPointerDown=${down} onPointerMove=${move} onPointerUp=${up} onPointerCancel=${up} onClick=${click}>
+    <div class="under" aria-hidden=${String(off === 0)}><button tabindex=${off === 0 ? -1 : 0} onClick=${() => { setOff(0); A.planDelete(it.id); }}>Slett</button></div>
+    <div role="button" tabindex="0" class=${'mini' + (conf ? ' ok' : '') + (drag ? ' drag' : '')} style=${{ transform: off ? 'translateX(' + off + 'px)' : '' }}
+      onPointerDown=${down} onPointerMove=${move} onPointerUp=${up} onPointerCancel=${up} onClick=${click} onKeyDown=${e => { if (e.key === 'Enter') click(); }}>
       <span class="time">${timeText(it)}</span><span class="ttl">${it.title}</span>
       <span class="row wrap"><span class=${'chip ' + whoClass(it.who)}>Hvem: ${whoText(it.who)}</span>${statusChip(it)}</span>
+      ${ask ? html`<div class="btns" style="margin-top:6px"><button class="btn sm" onClick=${stop(() => openItem(it.id, true))}>Nei, endre</button><button class="btn sm pri" onClick=${stop(() => A.yes(it.id))}>Ja, stemmer</button></div>` : null}
+    </div>
+  </div>`;
+}
+function DeleteBox({ it }) {
+  return html`<div class="delbox"><span class="q">Slette «${it.title}»?</span>
+    <label class="f">Begrunnelse<input class="inp" type="text" placeholder="F.eks. Lagt inn to ganger" value=${S.deleteText} onInput=${e => { S.deleteText = e.target.value; }} /></label>
+    ${S.deleteErr ? html`<span class="err">${S.deleteErr}</span>` : null}
+    <div class="btns"><button class="btn" onClick=${() => update(resetCard)}>Nei, behold</button><button class="btn danger" onClick=${() => A.deleteYes(it.id)}>Ja, slett</button></div>
+    <span class="small">Avtalen fjernes helt, også fra kalenderen. ${N(other())} får beskjed om at du slettet den, med begrunnelsen.</span></div>`;
+}
+// A finished appointment: one line that unfolds to its details.
+function DoneLine({ it, readOnly }) {
+  const open = S.openCard === it.id;
+  const ticked = it.done && !autoDone(Object.assign({}, it, { done: false }));
+  return html`<div data-flip=${it.id}>
+    <button class="lline done" aria-expanded=${String(open)} onClick=${() => A.toggleCard(it.id)}>
+      <span class=${'lw ' + whoClass(it.who)}>${whoLabel(it.who)}</span>
+      <span class="ct"><strong>${shortTime(it)}</strong> ${it.title}</span>
+      <span class="ck">${isConf(it) ? html`<${Ico} n="check" />` : html`<span class="small" style="font-weight:700">?</span>`}</span>
     </button>
+    <${Collapse} open=${open}><div class="dets donedets">
+      ${it.desc ? html`<span class="desc">${it.desc}</span>` : null}
+      ${placeView(it)}${legsView(it)}
+      <div class="chips"><span class=${'chip ' + whoClass(it.who)}>Hvem: ${whoText(it.who)}</span><span class="sp"></span>${statusChip(it)}</div>
+      <${Thread} it=${it} past=${true} />
+      ${!readOnly && ticked ? html`<button class="link" onClick=${() => A.undoDone(it.id)}>Angre gjennomført</button>` : null}
+    </div><//>
   </div>`;
 }
 
@@ -673,8 +713,8 @@ function PlanDay({ date }) {
     <${Collapse} open=${open}>
       ${isPast ? html`<div class="daybody">${all.length ? all.map(it => oneLine(it, () => openItem(it.id), null, 'done')) : html`<span class="small" style="padding:8px 0">Ingen avtaler denne dagen.</span>`}</div>`
       : html`<div class="daybody">
+        ${done.length ? html`<div class="donesec"><${SlideGroup} gkey=${'pdone|' + date} label=${'Gjennomført · ' + done.length}>${done.map(it => oneLine(it, () => openItem(it.id), null, 'done'))}<//></div>` : null}
         ${active.map(it => html`<${SwipeCard} key=${it.id} it=${it} />`)}
-        ${done.length ? html`<div style="margin-top:8px"><${SlideGroup} gkey=${'pdone|' + date} label=${'Gjennomført · ' + done.length}>${done.map(it => oneLine(it, () => openItem(it.id), null, 'done'))}<//></div>` : null}
         ${S.adding === date ? html`<${ItemForm} p="f" />` : html`<button class="addbtn" onClick=${() => A.startAdd(date)}><${Ico} n="plus" />Ny avtale</button>`}
         ${tiles.length ? html`
           <button class="tilerow" aria-expanded=${String(S.tilesOpen)} onClick=${() => update(s => { s.tilesOpen = !s.tilesOpen; s.tileEdit = null; })}><span class="l">Middag, bil og barnehage</span>${tileChanged ? html`<span class="tag">Endret</span>` : null}<${Chev} open=${S.tilesOpen} /></button>
@@ -716,14 +756,32 @@ function planWeek(o, first) {
     <h3 class="dsec">I morgen</h3><${PlanDay} date=${tomorrow} />
     ${tail}`;
 }
+// Weeks below the current one. The week right after is open; later weeks start folded.
 function moreWeeks(fn, skipNext) {
   const out = [];
   for (let k = skipNext ? 2 : 1; k <= S.moreWeeks && S.week + k <= S.data.weeksAhead; k++) {
-    const o = S.week + k, rel = o === 0 ? ' (denne uka)' : o === 1 ? ' (neste uke)' : o > 1 ? ' (om ' + o + ' uker)' : '';
-    out.push(html`<h2 class="wkhead" key=${'h' + o}>${wLabel(o)}<span>${rel}</span></h2>`, fn(o, false));
+    const o = S.week + k, rel = o === 0 ? 'denne uka' : o === 1 ? 'neste uke' : o > 1 ? 'om ' + o + ' uker' : '';
+    if (k === 1) {
+      out.push(html`<h2 class="wkhead" key=${'h' + o}>${wLabel(o)}<span>(${rel})</span></h2>`, fn(o, false));
+    } else {
+      let n = 0;
+      for (let d = 0; d < 7; d++) n += itemsOn(ds(addDays(weekMonday(o), d))).length;
+      out.push(html`<div class="wkgrp" key=${'g' + o}><${SlideGroup} gkey=${'wk' + o} label=${html`<span class="wkl">${wLabel(o)}</span><span class="wkn">${rel} · ${n ? countLabel(n) : 'ingen avtaler'}</span>`}>${fn(o, false)}<//></div>`);
+    }
   }
-  if (S.week + S.moreWeeks < S.data.weeksAhead) out.push(html`<div id="moreWeeks" class="small" style="text-align:center;padding:12px">Scroll for neste uke …</div>`);
+  if (S.week + S.moreWeeks < S.data.weeksAhead) out.push(html`<${LoadMore} key="more" />`);
   return out;
+}
+// Loads the next week whenever the end of the list comes into view.
+function LoadMore() {
+  const ref = useRef();
+  useEffect(() => {
+    if (!('IntersectionObserver' in window)) return;
+    const io = new IntersectionObserver(es => { if (es[0].isIntersecting) update(s => { s.moreWeeks++; }); }, { rootMargin: '400px' });
+    io.observe(ref.current);
+    return () => io.disconnect();
+  });
+  return html`<div ref=${ref} style="height:1px"></div>`;
 }
 function PlanView() {
   const ti = S.week === 0 ? dayIdx(S.data.today) : -1;
@@ -755,13 +813,7 @@ function Actions({ it }) {
       <div class="btns"><button class="btn" onClick=${() => update(resetCard)}>Nei, behold</button><button class="btn danger" onClick=${() => A.cancelYes(it.id)}>Ja, avlys</button></div>
       <span class="small">Avtalen fjernes fra kalenderen, og ${N(other())} får beskjed.</span></div>`;
   }
-  if (S.deleting === it.id) {
-    return html`<div class="delbox"><span class="q">Slette «${it.title}»?</span>
-      <label class="f">Begrunnelse<input class="inp" type="text" placeholder="F.eks. Lagt inn to ganger" value=${S.deleteText} onInput=${e => { S.deleteText = e.target.value; }} /></label>
-      ${S.deleteErr ? html`<span class="err">${S.deleteErr}</span>` : null}
-      <div class="btns"><button class="btn" onClick=${() => update(resetCard)}>Nei, behold</button><button class="btn danger" onClick=${() => A.deleteYes(it.id)}>Ja, slett</button></div>
-      <span class="small">Avtalen fjernes helt, også fra kalenderen. ${N(other())} får beskjed med begrunnelsen.</span></div>`;
-  }
+  if (S.deleting === it.id) return html`<${DeleteBox} it=${it} />`;
   if (needsMe(it)) {
     const q = it.note && it.noteBy !== me() ? N(it.noteBy) + ' foreslår en endring. Stemmer det?' : N(it.by) + ' har lagt inn dette. Stemmer det?';
     return html`<span class="q">${q}</span><div class="btns"><button class="btn" onClick=${() => A.edit(it.id)}>Nei, endre</button><button class="btn pri" onClick=${() => A.yes(it.id)}>Ja, stemmer</button></div>
@@ -814,14 +866,14 @@ function overviewWeek(o) {
     if (!x.all.length && !isToday) return;
     const todo = x.all.filter(it => !isDone(it)), done = x.all.filter(isDone);
     out.push(html`<section class="ovday" key=${x.date}><h2>${DAYN[x.d]} <span>${dLabel(pd(x.date))}</span>${isToday ? html` <span class="today" style="vertical-align:2px">I dag</span>` : null}</h2>
-      ${done.length ? html`<${SlideGroup} gkey=${'done|' + x.date} label=${'Gjennomført · ' + done.length}>${done.map(it => oneLine(it, () => openItem(it.id), it.done && !autoDone(Object.assign({}, it, { done: false })) ? html`<button class="undo" style="min-height:32px" onClick=${e => { e.stopPropagation(); A.undoDone(it.id); }}>Angre</button>` : null, 'done'))}<//>` : null}
+      ${done.length ? html`<${SlideGroup} gkey=${'done|' + x.date} label=${'Gjennomført · ' + done.length}>${done.map(it => html`<${DoneLine} key=${it.id} it=${it} />`)}<//>` : null}
       ${isToday ? html`<span class="sect" style="margin-top:6px">Kommende</span>` : null}
       ${todo.length ? todo.map(it => html`<${Card} key=${it.id} it=${it} mode=${isToday ? 'today' : 'future'} />`) : isToday ? html`<span class="small" style="padding:0 4px">Ingenting mer i dag.</span>` : null}
     </section>`);
   });
-  return out.length ? out : html`<div class="empty">Ingen avtaler denne uka ennå.</div>`;
+  return out.length ? out : html`<div class="empty">Ingen avtaler registrert.</div>`;
 }
-const OverviewView = () => html`${overviewWeek(S.week)}${moreWeeks(o => overviewWeek(o))}`;
+const OverviewView = () => html`${overviewWeek(S.week)}`;
 
 // ----- Item form (new and edit) -----
 function TimeBtn({ f, p, k, label }) {
@@ -995,11 +1047,6 @@ setInterval(() => {
     }).catch(() => {});
   }
 }, 20000);
-window.addEventListener('scroll', () => {
-  if (!S.data || (S.tab !== 'plan' && S.tab !== 'ov')) return;
-  const el = document.getElementById('moreWeeks');
-  if (el && el.getBoundingClientRect().top < window.innerHeight + 200) update(s => { s.moreWeeks++; });
-}, { passive: true });
 
 // ---------- Push ----------
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
@@ -1091,7 +1138,7 @@ const MOCK = (() => {
     undoConfirm: (k, id) => { get(id)[okF(k)] = false; return state(k); },
     changeItem: (k, id, f, c) => { const it = get(id), conf = it.ok1 && it.ok2; Object.assign(it, f); if (f.where !== it.whereAddr) it.whereAddr = f.where; if (c) { it.note = c; it.noteBy = k; it.thread = (it.thread || []).concat([{ by: k, text: c, at: new Date().toISOString() }]); } if (!conf) { it[okF(k)] = true; it[okF(oth(k))] = false; } return state(k); },
     cancelItem: (k, id) => { get(id).cancelled = true; return state(k); },
-    deleteItem: (k, id, reason, silent) => { const it = get(id); if (it) { it.cancelled = true; if (!silent) note(oth(k), NAMES[k] + ' slettet «' + it.title + '» – «' + reason + '»'); } return state(k); },
+    deleteItem: (k, id, reason, silent) => { const it = get(id); if (it) { it.cancelled = true; if (!silent) note(oth(k), NAMES[k] + ' slettet «' + it.title + '»: «' + reason + '»'); } return state(k); },
     setTile: (k, date, key, v) => { db.tiles[date + '|' + key] = v; return state(k); },
     markSeen: (k, ids) => { db.notes.forEach(n => { if (n.to === k && (ids === 'all' || ids.indexOf(n.id) !== -1)) n.seen = true; }); return state(k); },
     setReminder: (k, m) => { db.rem[k] = m; return state(k); },
